@@ -39,12 +39,17 @@ test("SSE only accepts complete server snapshots with valid progress and referen
   const event = {
     ...demoSnapshot,
     confirmedAt: "2026-11-12T11:00:00Z",
+    simulation: true,
+    run: null,
   };
 
   const confirmed = parseOfficeEvent(JSON.stringify(event));
   assert.equal(confirmed?.source, "backend");
   assert.equal(confirmed?.connection, "connected");
   assert.equal(confirmed?.agents.length, 12);
+  assert.equal(confirmed?.simulation, true);
+  assert.equal(parseOfficeEvent(JSON.stringify({ ...event, simulation: false })), null);
+  assert.equal(parseOfficeEvent(JSON.stringify({ ...event, run: { id: "run", status: "unknown" } })), null);
   assert.equal(parseOfficeEvent("not JSON"), null);
   assert.equal(parseOfficeEvent(JSON.stringify({
     ...event, agents: [{ ...event.agents[0], progress: 101 }],

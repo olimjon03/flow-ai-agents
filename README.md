@@ -16,7 +16,7 @@ The Next.js dashboard and the original prototype both use the same Python draft 
 
 ## Run locally
 
-Requirements: Node.js 22.13 or newer, npm, and Python 3.
+Requirements: Node.js 22.13 or newer, npm, and Python 3.11 or newer.
 
 In one terminal at the repository root, start the Python backend in sample mode.
 
@@ -32,13 +32,23 @@ npm ci
 npm run dev
 ```
 
+In a third terminal at the repository root, start the FastAPI office service.
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+python -m uvicorn flow_api.app:app --app-dir backend --host 127.0.0.1 --port 8001
+```
+
 - Dashboard: [http://localhost:3000](http://localhost:3000)
 - Original prototype: [http://localhost:8000](http://localhost:8000)
+- FastAPI office health: [http://localhost:8001/health](http://localhost:8001/health)
 - Python draft endpoint: `http://127.0.0.1:8000/api/generate`
 
 In **Create Content**, enter a brief, choose a social post or short video script, generate, edit, and copy the draft. Sample mode uses local templates and needs no credentials. The draft panel labels each successful response with the mode reported by Python.
 
-If the Python endpoint changes, copy `frontend/.env.example` to `frontend/.env.local`, edit `FLOW_API_URL`, and restart Next.js. The value is the full backend endpoint URL, including `/api/generate`.
+If the Python endpoint changes, copy `frontend/.env.example` to `frontend/.env.local`, edit `FLOW_API_URL`, and restart Next.js. The draft value is the full endpoint URL, including `/api/generate`. Set `FLOW_OFFICE_API_URL` to the FastAPI origin if the office port changes.
 
 ## How the dashboard works
 
@@ -52,19 +62,21 @@ The original prototype is served by Python from its original files. Python serve
 
 Open [AI Office](http://localhost:3000/ai-office) from the sidebar. On desktop, the elevated orthographic camera fits all 12 workstations on startup. Drag the floor to pan, scroll or use the zoom buttons, and use Reset camera to restore the full floor. Click a desk or its keyboard-accessible nameplate to view the task, progress and recent activity. Switch to 2D from the workstation header. Narrow screens, devices reporting 2 GB of memory or less, and WebGL initialization or context failures use the 2D view. The scene uses shared geometry and materials, capped pixel density, and no post-processing. Reduced-motion mode disables avatar animation.
 
-The page uses a fixed demo snapshot. Status poses, workflow counts, usage, and cost are illustrative. The cost uses example rates of $0.50 per million input tokens and $1.50 per million output tokens.
+With FastAPI running, wait for **Live backend · Simulated agents**, then select **Start demo task**. One local workflow at a time moves through Research, Create, Review and Deliver. The backend assigns tasks, publishes progress and keeps the latest 80 activity entries. The 3D view and the 2D fallback use the same confirmed snapshots. This simulation has zero provider requests, tokens and cost.
 
-### Connect an agent backend later
+Next.js proxies `POST /api/office/tasks` and `GET /api/office/events` to FastAPI. The SSE stream sends complete `office.snapshot` events, so a new connection receives the current state immediately. The server coalesces updates for slow clients. The browser shows the last confirmed simulation as disconnected if the stream breaks and reconnects automatically. Before any confirmed event, the office displays the offline demo preview with illustrative usage and disables task start.
 
-1. Add an authenticated, same-origin SSE endpoint that emits named `office.snapshot` events. Each event carries the latest `confirmedAt` timestamp, `agents`, `activity`, and `usagePeriod` as JSON. See `frontend/lib/office/model.ts` for types. The current floor has space for 12 agents.
-2. Map backend task states to `idle`, `queued`, `working`, `completed`, and `failed`. Report actual progress, token counts, and cost estimates for the given period. Send a fresh complete snapshot on connect and reconnect.
-3. Use `createSseOfficeSource` from `frontend/lib/office/sse.ts` in place of `demoSource`. It validates payloads, discards older snapshots, and marks the last confirmed snapshot as disconnected on connection failure. Add integration tests for authentication and reconnection against the actual service.
-
-The current page uses the demo source and opens no event stream.
+The office service keeps state in memory and uses one Uvicorn worker. Restarting it clears the run and activity. Use it on localhost. Persistence, authentication and real agent execution are future integration work. The original draft server remains available independently. If you run its optional OpenAI mode alongside the office, use a different port, such as 8002, and update `FLOW_API_URL`.
 
 ## Checks
 
-Run these from `frontend/` after `npm ci`.
+Run the backend tests from the repository root with the virtual environment active.
+
+```sh
+PYTHONPATH=backend python -m unittest discover -s backend/tests -v
+```
+
+Run these from `frontend/` after `npm ci`, with the Python virtual environment still active.
 
 ```sh
 npm run typecheck
@@ -76,7 +88,7 @@ npm run test:e2e
 
 If Turbopack cannot bind its internal build port in a restricted environment, run `npm run build -- --webpack`.
 
-The browser tests launch their own sample backend on port 8100 and dashboard on port 3100. They exercise the actual sample endpoint and simulate OpenAI responses. If the development server is already running, build first and use `PLAYWRIGHT_USE_BUILD=1 npm run test:e2e` to test the production build on its own port. To use a locally installed Google Chrome instead of downloading Chromium, run `PLAYWRIGHT_CHANNEL=chrome npm run test:e2e`.
+The browser tests launch the sample draft server on port 8100, FastAPI on 8101, and the dashboard on 3100. They exercise the actual sample endpoint and simulate OpenAI responses. If the development server is already running, build first and use `PLAYWRIGHT_USE_BUILD=1 npm run test:e2e` to test the production build on its own port. To use a locally installed Google Chrome instead of downloading Chromium, run `PLAYWRIGHT_CHANNEL=chrome npm run test:e2e`.
 
 ## Draft API
 

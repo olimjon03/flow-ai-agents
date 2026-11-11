@@ -13,6 +13,11 @@ export default defineConfig({
   },
   webServer: [
     {
+      command: "python3 -m uvicorn flow_api.app:app --app-dir ../backend --host 127.0.0.1 --port 8101",
+      url: "http://127.0.0.1:8101/health",
+      reuseExistingServer: false,
+    },
+    {
       command: "python3 ../backend/server.py --port 8100",
       url: "http://127.0.0.1:8100",
       reuseExistingServer: false,
@@ -22,7 +27,10 @@ export default defineConfig({
         ? "npm run start -- --port 3100"
         : "npm run dev -- --port 3100",
       url: "http://127.0.0.1:3100",
-      env: { FLOW_API_URL: "http://127.0.0.1:8100/api/generate" },
+      env: {
+        FLOW_API_URL: "http://127.0.0.1:8100/api/generate",
+        FLOW_OFFICE_API_URL: "http://127.0.0.1:8101",
+      },
       reuseExistingServer: false,
     },
   ],

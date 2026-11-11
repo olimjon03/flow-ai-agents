@@ -3,10 +3,13 @@
 import { CheckCircle2, Search, Send, Sparkles } from "lucide-react";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { OfficeViewport } from "./office-viewport";
-import { demoSnapshot, demoSource } from "../../lib/office/demo";
+import { demoSnapshot } from "../../lib/office/demo";
 import { latestFirst, stageProgress, totalUsage, workflow } from "../../lib/office/model";
 import type { Activity, Agent, AgentStatus, OfficeSnapshot } from "../../lib/office/model";
 
+import { createSseOfficeSource } from "../../lib/office/sse";
+
+const officeSource = createSseOfficeSource("/api/office/events", demoSnapshot);
 const stageIcons = { research: Search, create: Sparkles, review: CheckCircle2, deliver: Send };
 const number = new Intl.NumberFormat("en-US");
 const dollars = new Intl.NumberFormat("en-US", {
@@ -90,20 +93,22 @@ function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
       <dl className="office-usage">
         <div><dt>Requests</dt><dd>{number.format(usage.requests)}</dd></div>
         <div><dt>Tokens</dt><dd>{number.format(usage.inputTokens + usage.outputTokens)}</dd></div>
-        <div><dt>{snapshot.source === "demo" ? "Demo estimated cost" : "Estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
+        <div><dt>Demo estimated cost</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
       </dl>
-      {snapshot.source === "demo" && (
-        <p className="office-muted office-usage-note">
-          Demo rates per 1M tokens · $0.50 input / $1.50 output
-        </p>
-      )}
+      <p className="office-muted office-usage-note">
+        {snapshot.source === "demo"
+          ? "Demo rates per 1M tokens · $0.50 input / $1.50 output"
+          : "The local simulation makes no model API calls."}
+      </p>
     </section>
   );
 }
 
 export function Office() {
-  const snapshot = useSyncExternalStore(demoSource.subscribe, demoSource.getSnapshot, () => demoSnapshot);
+  const snapshot = useSyncExternalStore(officeSource.subscribe, officeSource.getSnapshot, () => demoSnapshot);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState("");
   const detail = useRef<HTMLElement>(null);
 
   const selected = snapshot.agents.find((agent) => agent.id === selectedId) ?? snapshot.agents[0];
@@ -113,7 +118,32 @@ export function Office() {
     if (!latestByAgent.has(event.agentId)) latestByAgent.set(event.agentId, event);
   }
   const names = new Map(snapshot.agents.map((agent) => [agent.id, agent.name]));
-  const demo = snapshot.source === "demo";
+  const offline = snapshot.source === "demo";
+  const connected = !offline && snapshot.connection === "connected";
+  const run = offline ? null : snapshot.run;
+  const running = run?.status === "running";
+
+  async function startDemo() {
+    if (!connected || starting || running) return;
+    setStarting(true);
+    setStartError("");
+    try {
+      const response = await fetch("/api/office/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: AbortSignal.timeout(6500),
+      });
+      if (!response.ok) {
+        const result = await response.json();
+        setStartError(result.error || "Could not start the demo.");
+      }
+    } catch {
+      setStartError("Could not start the demo. Try again.");
+    } finally {
+      setStarting(false);
+    }
+  }
 
   function selectAgent(id: string) {
     setSelectedId(id);
@@ -128,19 +158,29 @@ export function Office() {
       <header className="office-heading">
         <div className="office-heading-line">
           <h1>AI Office</h1>
-          {demo ? (
-            <div className="office-source">
-              <span className="office-demo">Demo data</span>
-              <span>Simulated activity · No live connection</span>
-            </div>
-          ) : (
-            <p className="office-source">
-              {snapshot.connection === "connected" ? "Backend confirmed" : "Disconnected · Last known status"}
-              {" · "}<time dateTime={snapshot.confirmedAt}>{time.format(new Date(snapshot.confirmedAt))} UTC</time>
-            </p>
-          )}
+          <div className="office-source">
+            <span className="office-demo">{offline ? "Demo data" : "Demo simulation"}</span>
+            <span role="status">
+              {offline ? "Simulated activity · No live connection"
+                : connected ? "Live backend · Simulated agents"
+                  : "Disconnected · Last confirmed simulation"}
+            </span>
+          </div>
         </div>
         <p>Explore agent workstations, workflows, and API usage.</p>
+        <div className="office-run-controls">
+          <button type="button" className="office-view-button" onClick={startDemo}
+            disabled={!connected || starting || running}>
+            {starting ? "Starting…" : "Start demo task"}
+          </button>
+          <span role="status" className="office-muted">
+            {!connected ? "Connect the local office backend to start a demo."
+              : running ? "Demo workflow running"
+                : run?.status === "completed" ? "Demo workflow completed"
+                  : run?.status === "failed" ? "Demo workflow failed" : "Ready to start"}
+          </span>
+          {startError && <span role="alert" className="error-text">{startError}</span>}
+        </div>
       </header>
 
       <div className="office-grid">
@@ -172,7 +212,7 @@ export function Office() {
           <section id="agent-details" ref={detail} tabIndex={-1}
             className="office-panel office-section" aria-labelledby="details-title">
             <h2 id="details-title">Agent details</h2>
-            {demo && <p className="office-muted">Simulated status and activity</p>}
+            <p className="office-muted">Simulated status and activity</p>
             {selected ? (
               <>
                 <div className="office-agent-detail" aria-live="polite">
@@ -205,7 +245,7 @@ export function Office() {
           <UsagePanel snapshot={snapshot} />
           <section className="office-panel office-section" aria-labelledby="timeline-title">
             <h2 id="timeline-title">Activity timeline</h2>
-            {demo && <p className="office-muted">Simulated activity log</p>}
+            <p className="office-muted">Simulated activity log</p>
             <ActivityList activity={ordered.slice(0, 4)} names={names} />
           </section>
         </div>

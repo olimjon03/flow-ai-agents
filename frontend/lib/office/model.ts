@@ -41,9 +41,17 @@ type OfficeData = {
   usagePeriod: string;
 };
 
+export type OfficeRun = { id: string; status: "running" | "completed" | "failed" };
+
 export type OfficeSnapshot = OfficeData & (
   | { source: "demo" }
-  | { source: "backend"; connection: "connected" | "disconnected"; confirmedAt: string }
+  | {
+    source: "backend";
+    connection: "connected" | "disconnected";
+    confirmedAt: string;
+    simulation: true;
+    run: OfficeRun | null;
+  }
 );
 
 /**
