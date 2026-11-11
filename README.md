@@ -14,8 +14,18 @@ Start with the frontend using Codex. Do not add production credentials.
 | `assets/` | Shared project assets |
 | `scripts/` | Development utilities |
 
+## Run the frontend
+
+From the project root, run the local static server with Python 3.
+
+```sh
+python3 -m http.server 8000 --bind 127.0.0.1 --directory frontend
+```
+
+Open [http://localhost:8000](http://localhost:8000). Enter a brief, select a format, and generate a sample draft. Edit the text in the draft panel and use the copy button to copy the edited version. The prototype runs in the browser and uses local templates.
+
 ## First milestone
 
-Start with a local web prototype. Let users enter a brief, select a content format, and copy the resulting draft. Use sample drafts in the prototype, then connect an AI provider through the backend once the provider and API are chosen.
+The local web prototype supports sample social posts and short video scripts. The next milestone is to connect an AI provider through the backend once the provider and API are chosen.
 
 See [the MVP brief](docs/mvp.md) for the first workflow.

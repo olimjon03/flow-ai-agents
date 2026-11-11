@@ -1,0 +1,182 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, system-ui, sans-serif;
+  color: #141d20;
+  background: #fff;
+  --muted: #566868;
+  --border: #c5d3d0;
+  --accent: #0f624f;
+  --paper: #e5f6ef;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+h1, h2, p { margin: 0; }
+[hidden] { display: none !important; }
+
+.shell {
+  width: min(calc(100% - 2 * clamp(20px, 3.6vw, 56px)), 1428px);
+  margin-inline: auto;
+}
+
+.brand {
+  padding: 26px 6px 0;
+  font-size: clamp(24px, 2.65vw, 41px);
+  font-weight: 800;
+  letter-spacing: -.025em;
+}
+
+main { padding-block: clamp(28px, 3.2vw, 50px) 56px; }
+
+h1 {
+  margin-inline: 6px;
+  font-size: clamp(36px, 4.3vw, 66px);
+  line-height: 1.1;
+  letter-spacing: -.025em;
+}
+
+.intro {
+  margin: 10px 6px 0;
+  color: var(--muted);
+  font-size: clamp(16px, 1.9vw, 30px);
+  line-height: 1.4;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 43.4fr) minmax(0, 56fr);
+  gap: clamp(14px, 1.35vw, 21px);
+  margin-top: clamp(24px, 2.45vw, 38px);
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: clamp(16px, 1.6vw, 25px);
+  padding: clamp(16px, 1.65vw, 26px);
+  background: #fff;
+}
+
+h2 {
+  font-size: clamp(23px, 2.35vw, 36px);
+  line-height: 1.2;
+  letter-spacing: -.02em;
+}
+
+.brief h2 { margin-bottom: clamp(16px, 1.6vw, 25px); }
+
+.brief label, legend, textarea, button {
+  font: inherit;
+  font-size: clamp(16px, 1.5vw, 23px);
+}
+
+label[for], legend { font-weight: 700; }
+
+textarea {
+  display: block;
+  width: 100%;
+  color: inherit;
+  line-height: 1.45;
+}
+
+#brief {
+  min-height: clamp(115px, 10.25vw, 158px);
+  resize: vertical;
+  margin-top: 12px;
+  padding: 12px 19px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+}
+
+textarea::placeholder { color: var(--muted); }
+
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: clamp(20px, 1.85vw, 29px) 0 clamp(24px, 2.35vw, 36px);
+  min-inline-size: 0;
+}
+
+legend { padding: 0; margin-bottom: 12px; }
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: clamp(12px, 1.5vw, 23px);
+  min-height: clamp(48px, 4vw, 62px);
+  padding: 8px clamp(12px, 1.4vw, 22px);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  cursor: pointer;
+}
+
+.option + .option { margin-top: clamp(8px, .85vw, 13px); }
+.option:has(input:checked) { background: var(--paper); border-color: var(--accent); }
+.option input { margin: 0; width: 1em; height: 1em; flex: none; accent-color: var(--accent); font: inherit; }
+
+button {
+  min-height: 44px;
+  border-radius: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.primary {
+  width: 100%;
+  min-height: clamp(48px, 4.4vw, 68px);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-size: clamp(17px, 1.7vw, 26px);
+}
+
+.primary:hover { background: #0a5041; }
+.note { color: var(--muted); font-size: clamp(14px, 1.32vw, 21px); line-height: 1.45; }
+.brief .note { margin-top: 14px; }
+
+.output { display: flex; flex-direction: column; gap: clamp(14px, 1.45vw, 22px); }
+.output-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+.copy {
+  min-height: clamp(44px, 3.55vw, 55px);
+  padding: 0 clamp(12px, 1.75vw, 27px);
+  border: 1px solid var(--accent);
+  background: #fff;
+  color: var(--accent);
+}
+
+.copy:disabled { cursor: default; color: var(--muted); border-color: var(--border); }
+.copy:not(:disabled):hover { background: var(--paper); }
+
+.paper {
+  display: grid;
+  flex: 1;
+  min-height: 270px;
+  border-radius: 17px;
+  background: var(--paper);
+}
+
+.empty {
+  place-self: center;
+  padding: 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: clamp(17px, 1.7vw, 26px);
+}
+
+#draft {
+  border: 0;
+  border-radius: inherit;
+  padding: clamp(18px, 2vw, 31px);
+  min-height: 100%;
+  resize: none;
+  background: transparent;
+}
+
+.status:empty { margin-top: calc(-1 * clamp(14px, 1.45vw, 22px)); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+@media (max-width: 720px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .paper { min-height: 260px; }
+}

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kontent ustaxonasi | Flow AI</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="shell brand">Flow AI</header>
+  <main class="shell">
+    <h1>Kontent ustaxonasi</h1>
+    <p class="intro">Brif yozing va kontentingiz uchun qoralama tayyorlang.</p>
+
+    <div class="workspace">
+      <form class="panel brief" id="brief-form" aria-labelledby="brief-title">
+        <h2 id="brief-title">Kontent brifi</h2>
+
+        <label for="brief">Brif</label>
+        <textarea id="brief" name="brief" maxlength="1000" required
+          placeholder="Mavzu, auditoriya va ohangni yozing…"></textarea>
+
+        <fieldset>
+          <legend>Format</legend>
+          <label class="option">
+            <input type="radio" name="format" value="post" required>
+            Ijtimoiy tarmoq posti
+          </label>
+          <label class="option">
+            <input type="radio" name="format" value="video">
+            Qisqa video ssenariysi
+          </label>
+        </fieldset>
+
+        <button class="primary" type="submit">Qoralama yaratish</button>
+        <p class="note">Prototip namunaviy qoralama yaratadi.</p>
+      </form>
+
+      <section class="panel output" aria-labelledby="draft-title">
+        <div class="output-header">
+          <h2 id="draft-title">Qoralama</h2>
+          <button class="copy" id="copy" type="button" disabled>Nusxalash</button>
+        </div>
+        <div class="paper">
+          <p class="empty" id="empty">Qoralama shu yerda chiqadi.</p>
+          <textarea id="draft" aria-label="Qoralamani tahrirlash" hidden></textarea>
+        </div>
+        <p id="status" class="note status" role="status"></p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
