@@ -70,3 +70,32 @@ test("maps unavailable, timed-out and malformed upstream responses to safe error
   fetchMock.mock.mockImplementation(async () => Response.json({ draft: "Missing mode" }));
   assert.equal((await POST(request(input))).status, 502);
 });
+
+test("rejects oversized and malformed JSON before forwarding it to Python", async (t) => {
+  const upstream = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  const input = { brief: "Sinov", format: "post" };
+  assert.equal((await POST(request(input, { "Content-Length": "16385" }))).status, 413);
+
+  const chunks = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(8192));
+      controller.enqueue(new Uint8Array(8193));
+      controller.close();
+    },
+  });
+  const streamed = new Request("http://localhost:3000/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: chunks,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  assert.equal((await POST(streamed)).status, 413);
+
+  const invalid = new Request("http://localhost:3000/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{",
+  });
+  assert.equal((await POST(invalid)).status, 400);
+  assert.equal(upstream.mock.callCount(), 0);
+});
