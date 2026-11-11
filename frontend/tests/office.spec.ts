@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  // These tests exercise the offline preview; the live suite uses the actual SSE endpoint.
+  await page.route("**/api/office/events", (route) => route.abort());
+});
+
 test("opens a clearly labeled demo office and switches the selected workstation", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.goto("/");

@@ -201,3 +201,19 @@
 .office-nameplates { pointer-events: none; }
 .office-nameplate { position: absolute; top: 0; left: 0; pointer-events: auto; }
 .office-nameplate:not([style*="transform"]) { visibility: hidden; }
+
+.office-run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .55rem .8rem;
+  margin-top: .65rem;
+}
+.office-run-controls button:disabled {
+  opacity: .62;
+  cursor: default;
+}
+.office-run-controls button:disabled:hover {
+  background: #1c2237;
+  border-color: #444d6d;
+}
