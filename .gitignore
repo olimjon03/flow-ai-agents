@@ -8,3 +8,8 @@ coverage/
 !.env.example
 
 __pycache__/
+.next/
+*.tsbuildinfo
+next-env.d.ts
+playwright-report/
+test-results/

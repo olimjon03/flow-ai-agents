@@ -41,6 +41,13 @@ class FlowHandler(SimpleHTTPRequestHandler):
         self.mode = mode
         super().__init__(*args, **kwargs)
 
+    def send_head(self):
+        # The frontend directory also contains the Next.js source and local config.
+        if urlsplit(self.path).path not in {"/", "/index.html", "/app.js", "/styles.css"}:
+            self.send_error(404)
+            return None
+        return super().send_head()
+
     def send_json(self, status, payload):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)

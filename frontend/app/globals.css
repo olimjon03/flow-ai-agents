@@ -1,0 +1,133 @@
+@import "tailwindcss" source(none);
+@source "./";
+@source "../components";
+
+@theme {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+  --canvas: #0c111b;
+  --sidebar: #121927;
+  --surface: #111824;
+  --line: #42516b;
+  --text: #f6f7fb;
+  --muted: #b7c3d9;
+  --accent: #7942e5;
+  --accent-hover: #6933d0;
+}
+
+body { @apply min-h-screen font-sans antialiased; color: var(--text); background: var(--canvas); }
+:focus-visible { outline: 2px solid #c4a2ff; outline-offset: 4px; }
+main:focus { outline: none; }
+.skip-link { @apply fixed z-20 rounded-lg bg-violet-700 px-4 py-2; left: 1rem; top: -5rem; }
+.skip-link:focus { top: 1rem; }
+
+.app-shell { @apply grid min-h-screen; grid-template-columns: clamp(220px, 18.55vw, 285px) minmax(0, 1fr); }
+.sidebar {
+  @apply sticky top-0 h-dvh overflow-auto;
+  background: var(--sidebar);
+  border-right: 1px solid var(--line);
+}
+.sidebar-header { @apply flex items-center justify-between px-8 py-7; }
+.brand { @apply whitespace-nowrap text-[clamp(1.5rem,2vw,2rem)] leading-none font-bold tracking-tight; }
+.nav-toggle { display: none !important; }
+.navigation { @apply grid gap-1 px-3.5 pt-4 pb-6; }
+.navigation a {
+  @apply flex min-h-12 items-center gap-5 rounded-xl px-5 py-2.5 font-medium;
+  font-size: clamp(.94rem, 1.28vw, 1.25rem);
+}
+.navigation a:hover { background: #242d42; }
+.navigation a[aria-current="page"] { background: #352956; }
+.navigation a[aria-current="page"][href="/create-content"] { background: #5637a5; }
+
+.page-frame { @apply mx-auto max-w-[100rem] px-[clamp(1rem,2vw,2rem)] pb-12; }
+.breadcrumb {
+  @apply flex min-h-[4.5rem] items-center gap-3 px-2 text-[clamp(.875rem,1.25vw,1.25rem)];
+  color: var(--muted);
+  border-bottom: 1px solid #2e3a50;
+}
+.breadcrumb span:last-child { @apply font-medium; color: var(--text); }
+.page-heading { @apply px-2 pt-8 pb-8; }
+.dashboard-page .page-heading { @apply pt-4 pb-6; }
+.dashboard-page .breadcrumb { border-bottom-color: transparent; }
+.page-heading h1 { @apply text-[clamp(2rem,3.15vw,3rem)] leading-tight font-bold tracking-tight; }
+.page-heading p { @apply mt-1 text-[clamp(1rem,1.6vw,1.5rem)] leading-relaxed; color: var(--muted); }
+.section-title { @apply text-[clamp(1.25rem,2.1vw,2rem)] leading-tight font-bold tracking-tight; }
+
+.panel { @apply rounded-xl border; border-color: var(--line); }
+.hero {
+  @apply flex min-h-[clamp(17rem,24.2vw,23.25rem)] items-center rounded-2xl px-[clamp(1.25rem,2.8vw,2.75rem)] py-8;
+  background: #12122c url("/flow-ribbons.webp") center / cover no-repeat;
+}
+.hero-copy { @apply max-w-[34rem]; }
+.hero h2 { @apply text-[clamp(1.65rem,3.05vw,2.9rem)] leading-tight font-bold tracking-tight; }
+.hero p { @apply mt-3 mb-7 max-w-[33rem] text-[clamp(1rem,1.55vw,1.45rem)] leading-snug; color: #d6ddf1; }
+.primary-button {
+  @apply inline-flex min-h-[3rem] items-center justify-center gap-2 rounded-xl px-6 py-3 text-center text-[clamp(1rem,1.45vw,1.375rem)] font-bold text-white;
+  background: var(--accent);
+}
+.primary-button:hover:not(:disabled) { background: var(--accent-hover); }
+.primary-button:disabled { @apply cursor-wait opacity-75; }
+.tools-grid { @apply grid grid-cols-3 gap-4; }
+.tool-card { @apply flex min-w-0 items-start gap-5 px-5 py-5; background: var(--surface); }
+.tool-card:hover { background: #1a2336; border-color: #8a68c6; }
+.tool-card h3 { @apply text-[clamp(1rem,1.5vw,1.4rem)] leading-tight font-semibold; }
+.tool-card p { @apply mt-1 text-[clamp(.875rem,1.15vw,1.1rem)] leading-snug; color: var(--muted); }
+
+.composer-grid { @apply grid gap-5; grid-template-columns: minmax(0, 48fr) minmax(0, 52fr); }
+.composer-panel { @apply min-w-0 p-[clamp(1rem,1.8vw,1.75rem)]; }
+.composer-panel h2 { @apply mb-6; }
+.field-label { @apply mb-2 block text-[clamp(.95rem,1.3vw,1.2rem)] font-semibold; }
+.inset { @apply rounded-xl border; border-color: #52627e; background: var(--surface); }
+.brief-input, .draft-editor {
+  @apply block w-full px-4 py-3 text-[clamp(1rem,1.3vw,1.25rem)] leading-relaxed;
+}
+.brief-input { @apply resize-y; min-height: clamp(9rem, 14.65vw, 14rem); }
+.brief-input::placeholder { color: #a2aec3; }
+.format-fieldset { @apply my-6 min-w-0; }
+.format-option { @apply flex min-h-10 cursor-pointer items-center gap-4 px-1 text-[clamp(1rem,1.3vw,1.25rem)]; }
+.format-option input { @apply size-5 shrink-0 accent-violet-500; }
+.composer-note { @apply mt-3 text-[clamp(.875rem,1.15vw,1.1rem)] leading-relaxed; color: var(--muted); }
+.draft-panel { @apply flex flex-col; }
+.draft-header { @apply mb-5 flex flex-wrap items-center gap-3; }
+.draft-header h2 { @apply m-0; }
+.icon-button { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border px-4 font-medium; border-color: var(--line); }
+.icon-button:hover:not(:disabled) { @apply bg-slate-800; }
+.icon-button:disabled { @apply cursor-default opacity-60; }
+.copy-button { @apply ml-auto; }
+.mode { @apply rounded-md px-2.5 py-1 text-xs font-semibold; }
+.mode-sample { @apply bg-slate-800 text-slate-200; }
+.mode-openai { @apply bg-violet-950 text-violet-200; }
+.draft-editor, .draft-empty { @apply flex-1; min-height: 18rem; }
+.draft-editor { @apply resize-y; }
+.draft-empty { @apply flex flex-col items-center justify-center gap-4 px-4 py-8 text-center text-[clamp(1rem,1.3vw,1.25rem)]; color: var(--muted); }
+.error-text { @apply text-sm leading-relaxed text-rose-300; }
+.section-panel { @apply p-[clamp(1rem,2vw,2rem)]; background: var(--surface); }
+.tool-empty { @apply flex min-h-56 flex-col items-center justify-center gap-4 text-center; color: var(--muted); }
+.settings-list { @apply mt-5 grid gap-5; }
+.settings-list dt { @apply font-semibold; }
+.settings-list dd { @apply mt-1 leading-relaxed; color: var(--muted); }
+.settings-list code { @apply break-words text-violet-200; }
+
+@media (max-width: 1120px) {
+  .tools-grid { @apply grid-cols-2; }
+}
+
+@media (max-width: 900px) {
+  .app-shell { @apply block; }
+  .sidebar { @apply relative h-auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sidebar-header { @apply px-4 py-3; }
+  .nav-toggle { display: inline-flex !important; }
+  .navigation { @apply hidden gap-1 pt-1 pb-4; }
+  .navigation.open { @apply grid grid-cols-2; }
+  .navigation a { @apply gap-2 px-3; }
+  .breadcrumb { @apply min-h-13 px-0; }
+  .page-heading, .dashboard-page .page-heading { @apply px-0 pt-6 pb-6; }
+}
+
+@media (max-width: 640px) {
+  .tools-grid, .composer-grid { @apply grid-cols-1; }
+  .hero { background-position: left center; }
+}
