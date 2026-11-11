@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from .agents import AgentError, Budget, MockProvider, STEPS, budget_limit
+
 logger = logging.getLogger(__name__)
 
 STAGES = ("research", "create", "review", "deliver")
@@ -61,7 +63,7 @@ def now():
 
 
 class DemoOrchestrator:
-    def __init__(self, tick_seconds: float = 0.55):
+    def __init__(self, tick_seconds: float = 0.55, provider=None, max_cost=None):
         self.tick_seconds = tick_seconds
         self.agents = {agent.id: agent for agent in AGENTS}
         self.activity = []
@@ -69,14 +71,22 @@ class DemoOrchestrator:
         self.worker = None
         self.updated_at = now()
         self.subscribers = set()
+        self.provider = provider or MockProvider(tick_seconds * 2)
+        self.max_cost = max_cost if max_cost is not None else budget_limit("0.05")
+        self.budget = Budget(self.max_cost)
 
     def snapshot(self):
         return {
             "confirmedAt": self.updated_at,
-            "simulation": True,
-            "usagePeriod": "Local simulation",
+            "simulation": not self.run or self.run.get("mode") != "openai",
+            "providerMode": self.provider.mode,
+            "usagePeriod": "Current workflow",
             "run": dict(self.run) if self.run else None,
-            "agents": [{**asdict(agent), "usage": dict(ZERO_USAGE)} for agent in self.agents.values()],
+            "agents": [
+                {**asdict(agent), "usage": self.budget.agents[agent.id].snapshot()
+                 if agent.id in self.budget.agents else dict(ZERO_USAGE)}
+                for agent in self.agents.values()
+            ],
             "activity": list(self.activity),
         }
 
@@ -118,6 +128,7 @@ class DemoOrchestrator:
         run_id = uuid4().hex
         self.run = {"id": run_id, "status": "running"}
         self.activity.clear()
+        self.budget = Budget(self.max_cost)
         for agent in AGENTS:
             self.agents[agent.id] = replace(agent, task=TASKS[agent.id])
             self.update_agent(agent.id, "queued", 0, f"Queued: {TASKS[agent.id]}")
@@ -151,6 +162,67 @@ class DemoOrchestrator:
                 if agent.status in ("queued", "working"):
                     self.update_agent(agent.id, "failed", agent.progress, "Simulation interrupted.")
         self.publish()
+
+    def start_agents(self, task):
+        if self.run and self.run["status"] == "running":
+            return None
+
+        run_id = uuid4().hex
+        self.run = {
+            "id": run_id, "status": "running", "mode": self.provider.mode,
+            "script": None, "review": None, "error": None,
+        }
+        self.activity.clear()
+        self.budget = Budget(self.max_cost)
+        self.agents = {agent.id: agent for agent in AGENTS}
+        for step in STEPS:
+            description = f"{step.label}: {task.topic}"
+            self.agents[step.agent_id] = replace(self.agents[step.agent_id], task=description)
+            self.update_agent(step.agent_id, "queued", 0, f"{step.label} queued")
+        self.publish()
+        self.worker = asyncio.create_task(self.execute_agents(task), name=f"office-agents-{run_id}")
+        return run_id
+
+    async def execute_agents(self, task):
+        previous = {}
+        for index, step in enumerate(STEPS):
+            self.update_agent(step.agent_id, "working", 0, f"{step.label} started")
+            self.publish()
+
+            def on_retry(message):
+                self.update_agent(step.agent_id, "working", 0, f"{message} Retrying.")
+                self.publish()
+
+            try:
+                output = await self.provider.generate(step, task, previous, self.budget, on_retry)
+            except Exception as error:
+                message = str(error) if isinstance(error, AgentError) else "Agent execution failed."
+                self.run.update(status="failed", error=message)
+                self.update_agent(step.agent_id, "failed", 0, message)
+                for pending in STEPS[index + 1:]:
+                    self.update_agent(pending.agent_id, "idle", 0, "Skipped after workflow failure.")
+                self.publish()
+                return
+
+            previous[step.label] = output
+            if step.agent_id == "quill":
+                self.run["script"] = output
+            if step.agent_id == "guard":
+                self.run.update(status="completed", review=output)
+            self.update_agent(step.agent_id, "completed", 100, f"{step.label} completed")
+            self.publish()
+
+    def cancel(self, run_id):
+        if not self.run or self.run["id"] != run_id or self.run["status"] != "running":
+            return False
+
+        self.worker.cancel()
+        self.run["status"] = "cancelled"
+        for agent in self.agents.values():
+            if agent.status in ("queued", "working"):
+                self.update_agent(agent.id, "idle", agent.progress, "Run cancelled.")
+        self.publish()
+        return True
 
     async def close(self):
         if self.worker and not self.worker.done():

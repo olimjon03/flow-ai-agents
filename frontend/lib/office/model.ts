@@ -41,7 +41,16 @@ type OfficeData = {
   usagePeriod: string;
 };
 
-export type OfficeRun = { id: string; status: "running" | "completed" | "failed" };
+export type ProviderMode = "mock" | "openai";
+
+export type OfficeRun = {
+  id: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  mode?: ProviderMode;
+  script?: string | null;
+  review?: string | null;
+  error?: string | null;
+};
 
 export type OfficeSnapshot = OfficeData & (
   | { source: "demo" }
@@ -49,7 +58,8 @@ export type OfficeSnapshot = OfficeData & (
     source: "backend";
     connection: "connected" | "disconnected";
     confirmedAt: string;
-    simulation: true;
+    simulation: boolean;
+    providerMode: ProviderMode;
     run: OfficeRun | null;
   }
 );

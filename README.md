@@ -66,7 +66,29 @@ With FastAPI running, wait for **Live backend · Simulated agents**, then select
 
 Next.js proxies `POST /api/office/tasks` and `GET /api/office/events` to FastAPI. The SSE stream sends complete `office.snapshot` events, so a new connection receives the current state immediately. The server coalesces updates for slow clients. The browser shows the last confirmed simulation as disconnected if the stream breaks and reconnects automatically. Before any confirmed event, the office displays the offline demo preview with illustrative usage and disables task start.
 
-The office service keeps state in memory and uses one Uvicorn worker. Restarting it clears the run and activity. Use it on localhost. Persistence, authentication and real agent execution are future integration work. The original draft server remains available independently. If you run its optional OpenAI mode alongside the office, use a different port, such as 8002, and update `FLOW_API_URL`.
+The office service keeps state in memory and uses one Uvicorn worker. Restarting it clears the run and activity. Use it on localhost. Persistence and authentication are future integration work. The original draft server remains available independently. If you run its optional OpenAI mode alongside the office, use a different port, such as 8002, and update `FLOW_API_URL`.
+
+## Run the content agents
+
+Open **AI Office → Agent workflow**. Enter a topic, language, style, and duration in seconds (15–600). Select **Run in mock mode** to get a deterministic script and review. The three agents run in order and report status and progress over SSE. **Cancel run** stops the current local workflow. Script and review appear under the office as they become available.
+
+### Enable real OpenAI mode on macOS zsh
+
+Create an API key for an OpenAI project with model access and API billing. Stop the FastAPI office process with **Ctrl+C**. From the repository root, activate the virtual environment and start only the office service in OpenAI mode.
+
+```zsh
+source .venv/bin/activate
+read -rs 'flow_office_key?OpenAI API key: '
+FLOW_OFFICE_PROVIDER=openai FLOW_OFFICE_MAX_COST_USD=0.05 OPENAI_API_KEY="$flow_office_key" \
+  python -m uvicorn flow_api.app:app --app-dir backend --host 127.0.0.1 --port 8001
+unset flow_office_key
+```
+
+Open AI Office after the backend reconnects. In **Agent workflow**, fill the brief, check **Allow paid OpenAI requests for this run**, then select **Run with OpenAI**. The existing **Start demo task** button continues to launch the 12-agent simulation. Restart the service with `FLOW_OFFICE_PROVIDER=mock` to return to mock mode.
+
+The adapter uses GPT-5.4 mini through the [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create), with a 25-second deadline per request and at most one retry for timeouts, transport errors, HTTP 429, and HTTP 5xx. The per-run estimated cost cap defaults to $0.05 and accepts $0.001–$1.00. Each attempt reserves an estimate before sending, including retries, and reconciles it against usage returned by OpenAI. Attempts with unknown usage keep their reservation. Provider charges can differ from the estimate, including for a request already accepted when cancellation occurs. See [model rates](https://developers.openai.com/api/docs/models/gpt-5.4-mini#pricing).
+
+Research produces model-generated notes and flags claims that need verification. The workflow makes text requests without browsing or publishing tools. The app keeps only the current run and its outputs in memory.
 
 ## Checks
 

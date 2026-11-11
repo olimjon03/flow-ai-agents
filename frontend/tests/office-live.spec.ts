@@ -38,3 +38,22 @@ test("the 3D office receives real simulated task events and reconnects to the la
   const usage = page.getByRole("region", { name: "API usage" });
   await expect(usage.getByText("$0.000", { exact: true })).toBeVisible();
 });
+
+test("submits a mock agent brief and displays the script and review from SSE", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/ai-office");
+  await expect(page.getByText("Live backend · Simulated agents")).toBeVisible();
+  await page.getByText("Agent workflow", { exact: true }).click();
+  await page.getByLabel("Topic").fill("Urban gardens");
+  await page.getByLabel("Language").fill("English");
+  await page.getByLabel("Content style").fill("Friendly");
+  await page.getByLabel("Target duration (seconds)").fill("75");
+  await page.getByRole("button", { name: "Run in mock mode" }).click();
+  await expect(page.getByText("Mock workflow running")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel run" })).toBeVisible();
+  await expect(page.getByText("Mock workflow completed")).toBeVisible({ timeout: 12_000 });
+  const results = page.getByRole("region", { name: "Mock results" });
+  await expect(results.getByText(/Urban gardens · English · Friendly · 75s/)).toBeVisible();
+  await expect(results.getByText(/Mock review/)).toBeVisible();
+  await expect(page.getByRole("region", { name: "API usage" }).getByText("$0.000", { exact: true })).toBeVisible();
+});
