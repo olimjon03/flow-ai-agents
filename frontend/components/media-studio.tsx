@@ -1,0 +1,234 @@
+"use client";
+
+import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
+
+type Brief = {
+  topic: string; language: string; style: string; durationSeconds: number;
+  aspect: string; gender: string; resolution: string; backgroundAudio: boolean;
+};
+type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null };
+type Scene = { id: string; index: number; start: number; duration: number; description: string; narration: string; prompt: string };
+type ProjectSummary = { id: string; topic: string; status: string };
+type Project = {
+  id: string; brief: Brief; status: string; script: string | null; review: string | null;
+  scenes: Scene[]; assets: Asset[]; finalAssetId: string | null; error: string | null;
+  stages: Record<string, { status: string; progress: number }>;
+  activity: { at: string; stage: string; message: string }[];
+  approval: string; feedback: string | null; scriptApproved: boolean;
+};
+
+const projectsUrl = "/api/studio/projects";
+const stageLabels: Record<string, string> = {
+  research: "Research", script: "Script", review: "Review", storyboard: "Storyboard",
+  image: "Image", voice: "Voice", video: "Video", editor: "Editor",
+};
+const displayStatus = (value: string) => value.replaceAll("_", " ");
+const assetUrl = (projectId: string, assetId: string) => `${projectsUrl}/${projectId}/assets/${assetId}`;
+
+async function request<T>(url: string, signal?: AbortSignal, payload?: object): Promise<T> {
+  const response = await fetch(url, payload ? {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,
+  } : { signal, cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || "Studio request failed.");
+  return result;
+}
+
+function ProjectForm({ disabled, onCreate }: { disabled: boolean; onCreate: (brief: Brief) => void }) {
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    onCreate({
+      topic: String(data.get("topic") ?? "").trim(), language: String(data.get("language") ?? "").trim(),
+      style: String(data.get("style") ?? "").trim(), durationSeconds: Number(data.get("duration")),
+      aspect: String(data.get("aspect")), gender: String(data.get("gender")),
+      resolution: String(data.get("resolution")), backgroundAudio: data.has("background"),
+    });
+  }
+
+  return (
+    <details className="panel studio-panel" open>
+      <summary>New project</summary>
+      <form className="studio-form" onSubmit={submit}>
+        <label>Topic<input name="topic" required maxLength={200} /></label>
+        <label>Language<input name="language" defaultValue="Uzbek" required maxLength={40} /></label>
+        <label>Content style<input name="style" defaultValue="Conversational" required maxLength={80} /></label>
+        <label>Duration (seconds)<input name="duration" type="number" min={15} max={120} defaultValue={30} required /></label>
+        <label>Aspect ratio<select name="aspect"><option>9:16</option><option>16:9</option></select></label>
+        <label>Voice preference<select name="gender"><option value="male">Male</option><option value="female">Female</option><option value="neutral">Neutral</option></select></label>
+        <label>Export resolution<select name="resolution"><option value="test">360p test</option><option value="full">1080p full</option></select></label>
+        <label className="studio-check"><input name="background" type="checkbox" /> Add background tone</label>
+        <button type="submit" disabled={disabled}>Create project</button>
+      </form>
+    </details>
+  );
+}
+
+function ProjectView({ project, pending, onAction }: {
+  project: Project; pending: boolean; onAction: (action: string, extra?: object) => void;
+}) {
+  const [feedback, setFeedback] = useState("");
+  const [regenerate, setRegenerate] = useState("script");
+  const working = project.status === "working";
+  const captions = project.assets.find((asset) => asset.extension === ".vtt");
+  const final = project.finalAssetId ? assetUrl(project.id, project.finalAssetId) : null;
+
+  return (
+    <div className="studio-content">
+      <section className="panel studio-panel">
+        <div className="studio-title"><h2>{project.brief.topic}</h2><span role="status">{displayStatus(project.status)}</span></div>
+        {project.error && <p role="alert" className="error-text">{project.error}</p>}
+        <ul className="studio-stages">
+          {Object.entries(stageLabels).map(([stage, label]) => (
+            <li key={stage}><strong>{label}</strong><span>{project.stages[stage].status}</span>
+              <progress aria-label={`${label} progress`} max={100} value={project.stages[stage].progress} />
+            </li>
+          ))}
+        </ul>
+        <div className="studio-actions">
+          {project.status === "draft" && <button disabled={pending} onClick={() => onAction("start")}>Start mock workflow</button>}
+          {project.status === "awaiting_script_approval" && <button disabled={pending} onClick={() => onAction("approve-script")}>Approve script and storyboard</button>}
+          {working && <button disabled={pending} onClick={() => onAction("cancel")}>Cancel production</button>}
+          {!working && project.status !== "draft" && (
+            <form className="studio-actions" onSubmit={(event) => {
+              event.preventDefault();
+              onAction("regenerate", { stage: regenerate });
+            }}>
+              <label>Regenerate stage<select value={regenerate} onChange={(event) => setRegenerate(event.target.value)}>
+                {["script", "image", "voice", "video", "editor"].filter((stage) => stage === "script" || project.scriptApproved)
+                  .map((stage) => <option key={stage} value={stage}>{stageLabels[stage]}</option>)}
+              </select></label>
+              <button disabled={pending || (!project.scriptApproved && regenerate !== "script")}>Regenerate</button>
+            </form>
+          )}
+          <Link href="/ai-office">Open AI Office</Link>
+        </div>
+      </section>
+
+      {project.scenes.length > 0 && <section className="panel studio-panel">
+        <h2>Storyboard and editing timeline</h2>
+        {project.script && <details><summary>Script and review</summary><p className="studio-script">{project.script}</p><p className="studio-script">{project.review}</p></details>}
+        <div className="studio-scenes">
+          {project.scenes.map((scene) => {
+            const image = project.assets.find((asset) => asset.sceneId === scene.id && asset.extension === ".png");
+            const video = project.assets.find((asset) => asset.sceneId === scene.id && asset.extension === ".mp4");
+            return <article key={scene.id}>
+              <h3>Scene {scene.index + 1} · {scene.start}–{scene.start + scene.duration}s</h3>
+              <p>{scene.description}</p><p>{scene.prompt}</p>
+              {image && <img src={assetUrl(project.id, image.id)} alt={`Mock image for scene ${scene.index + 1}`} />}
+              {video && <video controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
+            </article>;
+          })}
+        </div>
+        {project.assets.filter((asset) => asset.extension === ".wav").map((asset) => (
+          <div key={asset.id} className="studio-audio"><p>{asset.label}</p><audio controls preload="none" aria-label={asset.label} src={assetUrl(project.id, asset.id)} /></div>
+        ))}
+      </section>}
+
+      <section className="panel studio-panel">
+        <h2>Final export</h2>
+        {final ? <>
+          <video controls preload="metadata" className="studio-final" aria-label="Final MP4" src={final}>
+            {captions && <track kind="subtitles" label={project.brief.language} src={assetUrl(project.id, captions.id)} default />}
+          </video>
+          <div className="studio-actions">
+            <a href={`${final}?download=true`}>Download MP4</a>
+            <button disabled={pending || working} onClick={() => onAction("approve")}>Approve final video</button>
+          </div>
+          <form className="studio-actions" onSubmit={(event) => {
+            event.preventDefault();
+            onAction("reject", { feedback: feedback.trim() });
+          }}>
+            <label>Rejection feedback<input required maxLength={1000} value={feedback} onChange={(event) => setFeedback(event.target.value)} /></label>
+            <button disabled={pending || working || !feedback.trim()}>Reject final video</button>
+          </form>
+          {project.feedback && <p>Feedback · {project.feedback}</p>}
+        </> : <p>{working ? "Production in progress" : "No final MP4 yet"}</p>}
+      </section>
+
+      <section className="panel studio-panel">
+        <h2>Agent activity</h2>
+        <ul className="studio-activity">{project.activity.map((event, index) => (
+          <li key={`${event.at}-${index}`}><strong>{stageLabels[event.stage]}</strong> · {event.message}</li>
+        ))}</ul>
+        {!project.activity.length && <p>No activity yet.</p>}
+      </section>
+    </div>
+  );
+}
+
+export function Studio() {
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [id, setId] = useState<string | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    request<ProjectSummary[]>(projectsUrl, controller.signal).then((list) => {
+      setProjects(list);
+      setId((selected) => selected ?? list[0]?.id ?? null);
+    }).catch((failure) => { if (!controller.signal.aborted) setError(failure.message); });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!id || pending) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
+        const updated = await request<Project>(`${projectsUrl}/${id}`, controller.signal);
+        if (controller.signal.aborted) return;
+        setProject(updated);
+        setProjects((list) => list.map((item) => item.id === id ? { ...item, status: updated.status } : item));
+        if (updated.status === "working") timer = setTimeout(refresh, 650);
+      } catch (failure) {
+        if (!controller.signal.aborted) {
+          setError(failure instanceof Error ? failure.message : "Could not refresh the project.");
+          timer = setTimeout(refresh, 1500);
+        }
+      }
+    }
+    void refresh();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [id, pending]);
+
+  async function mutate(url: string, payload: object, creating = false) {
+    setPending(true);
+    setError("");
+    try {
+      const next = await request<Project>(url, undefined, payload);
+      if (creating) setProjects((list) => [{ id: next.id, topic: next.brief.topic, status: next.status }, ...list]);
+      setId(next.id);
+      setProject(next);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Studio request failed.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="page-frame studio">
+      <div className="breadcrumb">Workspace / <span>Media Studio</span></div>
+      <header className="page-heading"><h1>Media Studio</h1><p>Produce and review a local video in mock mode.</p></header>
+      {error && <p role="alert" className="error-text">{error}</p>}
+      <ProjectForm disabled={pending} onCreate={(brief) => void mutate(projectsUrl, brief, true)} />
+      <div className="studio-layout">
+        <aside className="panel studio-panel"><h2>Projects</h2>
+          <ul className="studio-projects">{projects.map((item) => (
+            <li key={item.id}><button type="button" aria-pressed={id === item.id} disabled={pending}
+              onClick={() => { setError(""); setId(item.id); }}>
+              {item.topic}<small>{displayStatus(item.status)}</small>
+            </button></li>
+          ))}</ul>
+        </aside>
+        {project && project.id === id && <ProjectView key={project.id} project={project} pending={pending}
+          onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })} />}
+      </div>
+    </div>
+  );
+}

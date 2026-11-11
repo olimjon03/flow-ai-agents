@@ -1,4 +1,4 @@
-export type AgentStatus = "idle" | "queued" | "working" | "completed" | "failed";
+export type AgentStatus = "idle" | "queued" | "working" | "completed" | "failed" | "cancelled";
 
 export const workflow = [
   { id: "research", label: "Research" },

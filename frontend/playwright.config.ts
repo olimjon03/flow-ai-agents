@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
@@ -15,7 +17,10 @@ export default defineConfig({
     {
       command: "python3 -m uvicorn flow_api.app:app --app-dir ../backend --host 127.0.0.1 --port 8101",
       url: "http://127.0.0.1:8101/health",
-      env: { FLOW_OFFICE_PROVIDER: "mock" },
+      env: {
+        FLOW_OFFICE_PROVIDER: "mock",
+        FLOW_MEDIA_ROOT: join(tmpdir(), `flow-ai-studio-tests-${process.pid}`),
+      },
       reuseExistingServer: false,
     },
     {

@@ -14,10 +14,12 @@ export const tools = [
 ];
 
 export const aiOffice = { label: "AI Office", href: "/ai-office", icon: Monitor };
+export const mediaStudio = { label: "Media Studio", href: "/media-studio", icon: Film };
 export const settings = { label: "Settings", href: "/settings", icon: Settings };
 export const navigation = [
   dashboard,
   createContent,
+  mediaStudio,
   ...tools.flatMap((tool) => {
     const link = { ...tool, href: `/${tool.slug}` };
     return tool.slug === "ai-agents" ? [link, aiOffice] : [link];

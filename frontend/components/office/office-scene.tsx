@@ -13,7 +13,7 @@ type Triple = [number, number, number];
 export type CameraCommand = { action: "in" | "out" | "reset" };
 
 const statusColors: Record<AgentStatus, string> = {
-  idle: "#91a7c8", queued: "#f5bf69", working: "#55ead8", completed: "#c391ff", failed: "#fc879e",
+  idle: "#91a7c8", queued: "#f5bf69", working: "#55ead8", completed: "#c391ff", failed: "#fc879e", cancelled: "#b5a2b9",
 };
 const wardrobe = ["#9877dd", "#568acc", "#63b7ad", "#ce8c7a", "#bb83b6", "#7084ca"];
 const skin = ["#efb89e", "#ac705a", "#d99b77", "#865342"];

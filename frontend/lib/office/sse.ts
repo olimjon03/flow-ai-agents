@@ -1,7 +1,7 @@
 import { workflow } from "./model.ts";
 import type { Agent, AgentStatus, Activity, OfficeRun, OfficeSnapshot, OfficeSource, Usage } from "./model.ts";
 
-const statuses = new Set<AgentStatus>(["idle", "queued", "working", "completed", "failed"]);
+const statuses = new Set<AgentStatus>(["idle", "queued", "working", "completed", "failed", "cancelled"]);
 const stages = new Set<string>(workflow.map(({ id }) => id));
 
 type ConfirmedSnapshot = Extract<OfficeSnapshot, { source: "backend" }>;
