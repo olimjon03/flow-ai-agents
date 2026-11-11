@@ -31,7 +31,7 @@ form.addEventListener('submit', async (event) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ brief: text, format }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(35000),
     });
     if (!response.ok) throw new Error('Generation request failed');
 
@@ -43,7 +43,9 @@ form.addEventListener('submit', async (event) => {
     draft.value = result.draft;
     emptyState.hidden = true;
     draft.hidden = false;
-    status.textContent = 'Qoralama tayyor.';
+    status.textContent = result.mode === 'openai'
+      ? 'AI qoralamasi tayyor.'
+      : 'Namunaviy qoralama tayyor.';
     draft.focus();
     draft.setSelectionRange(0, 0);
   } catch {

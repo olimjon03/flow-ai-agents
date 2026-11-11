@@ -34,6 +34,18 @@ curl http://localhost:8000/api/generate \
   -d '{"brief":"Talabalar uchun vaqtni rejalash","format":"post"}'
 ```
 
-A successful response contains a `draft` string. Invalid requests return a 4xx response with an `error` string. The next milestone is connecting the selected AI provider to this endpoint.
+A successful response contains a `draft` string and a `mode` of `sample` or `openai`. Invalid requests return a 4xx response with an `error` string. OpenAI request failures return 502.
+
+## Generate with OpenAI
+
+Stop the sample server, then run the following in macOS zsh from the project root. The prompt hides your input. Use an OpenAI API key from a project with access to the model.
+
+```zsh
+read -rs 'flow_api_key?OpenAI API key: '
+OPENAI_API_KEY="$flow_api_key" python3 backend/server.py --openai
+unset flow_api_key
+```
+
+The server uses `gpt-5.4-mini` by default. Set `OPENAI_MODEL` in the server environment to override it. In OpenAI mode the backend sends the brief to the [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create). Keep the key in the backend environment. Run `python3 backend/server.py` for sample mode.
 
 See [the MVP brief](docs/mvp.md) for the first workflow.
