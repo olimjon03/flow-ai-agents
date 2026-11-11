@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -38,9 +38,10 @@ jobs:
         run: npm test
       - name: Production build
         run: npm run build -- --webpack
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Check runner Chrome
+        run: google-chrome --version
       - name: Browser and Python API tests
         run: npm run test:e2e
         env:
           PLAYWRIGHT_USE_BUILD: '1'
+          PLAYWRIGHT_CHANNEL: chrome
