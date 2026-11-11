@@ -15,7 +15,9 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: "npm run dev -- --port 3100",
+      command: process.env.PLAYWRIGHT_USE_BUILD
+        ? "npm run start -- --port 3100"
+        : "npm run dev -- --port 3100",
       url: "http://127.0.0.1:3100",
       env: { FLOW_API_URL: "http://127.0.0.1:8100/api/generate" },
       reuseExistingServer: false,

@@ -48,6 +48,20 @@ The App Router handles navigation and page layouts. Interactive components handl
 
 The original prototype is served by Python from its original files. Python serves only its three public static files from `frontend/`, which also contains the new dashboard source and local configuration.
 
+## AI Office
+
+Open [AI Office](http://localhost:3000/ai-office) from the sidebar. On desktop, the elevated orthographic camera fits all 12 workstations on startup. Drag the floor to pan, scroll or use the zoom buttons, and use Reset camera to restore the full floor. Click a desk or its keyboard-accessible nameplate to view the task, progress and recent activity. Switch to 2D from the workstation header. Narrow screens, devices reporting 2 GB of memory or less, and WebGL initialization or context failures use the 2D view. The scene uses shared geometry and materials, capped pixel density, and no post-processing. Reduced-motion mode disables avatar animation.
+
+The page uses a fixed demo snapshot. Status poses, workflow counts, usage, and cost are illustrative. The cost uses example rates of $0.50 per million input tokens and $1.50 per million output tokens.
+
+### Connect an agent backend later
+
+1. Add an authenticated, same-origin SSE endpoint that emits named `office.snapshot` events. Each event carries the latest `confirmedAt` timestamp, `agents`, `activity`, and `usagePeriod` as JSON. See `frontend/lib/office/model.ts` for types. The current floor has space for 12 agents.
+2. Map backend task states to `idle`, `queued`, `working`, `completed`, and `failed`. Report actual progress, token counts, and cost estimates for the given period. Send a fresh complete snapshot on connect and reconnect.
+3. Use `createSseOfficeSource` from `frontend/lib/office/sse.ts` in place of `demoSource`. It validates payloads, discards older snapshots, and marks the last confirmed snapshot as disconnected on connection failure. Add integration tests for authentication and reconnection against the actual service.
+
+The current page uses the demo source and opens no event stream.
+
 ## Checks
 
 Run these from `frontend/` after `npm ci`.
@@ -62,7 +76,7 @@ npm run test:e2e
 
 If Turbopack cannot bind its internal build port in a restricted environment, run `npm run build -- --webpack`.
 
-The browser tests launch their own sample backend on port 8100 and dashboard on port 3100. They exercise the actual sample endpoint and simulate OpenAI responses. To use a locally installed Google Chrome instead of downloading Chromium, run `PLAYWRIGHT_CHANNEL=chrome npm run test:e2e`.
+The browser tests launch their own sample backend on port 8100 and dashboard on port 3100. They exercise the actual sample endpoint and simulate OpenAI responses. If the development server is already running, build first and use `PLAYWRIGHT_USE_BUILD=1 npm run test:e2e` to test the production build on its own port. To use a locally installed Google Chrome instead of downloading Chromium, run `PLAYWRIGHT_CHANNEL=chrome npm run test:e2e`.
 
 ## Draft API
 

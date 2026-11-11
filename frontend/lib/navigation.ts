@@ -1,5 +1,5 @@
 import {
-  ChartNoAxesColumnIncreasing, Film, Folder, House, Image, Pencil, Send, Settings, Sparkle,
+  ChartNoAxesColumnIncreasing, Film, Folder, House, Image, Monitor, Pencil, Send, Settings, Sparkle,
 } from "lucide-react";
 
 export const dashboard = { label: "Dashboard", href: "/", icon: House };
@@ -13,10 +13,14 @@ export const tools = [
   { slug: "analytics", label: "Analytics", icon: ChartNoAxesColumnIncreasing, description: "Understand what’s working and inform your next creative move.", empty: "Analytics will be available once publishing data is connected." },
 ];
 
+export const aiOffice = { label: "AI Office", href: "/ai-office", icon: Monitor };
 export const settings = { label: "Settings", href: "/settings", icon: Settings };
 export const navigation = [
   dashboard,
   createContent,
-  ...tools.map((tool) => ({ ...tool, href: `/${tool.slug}` })),
+  ...tools.flatMap((tool) => {
+    const link = { ...tool, href: `/${tool.slug}` };
+    return tool.slug === "ai-agents" ? [link, aiOffice] : [link];
+  }),
   settings,
 ];
