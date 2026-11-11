@@ -61,7 +61,7 @@ test("desktop WebGL overview shows twelve readable stations and can pan, zoom an
   await page.goto("/ai-office");
   const workstations = page.getByRole("region", { name: "Workstations" });
   const camera = page.getByRole("group", { name: "Office camera" });
-  const labels = workstations.getByRole("button", { name: /workstation ·/ });
+  const labels = workstations.getByRole("button", { name: /workstation$/ });
   await expect(labels).toHaveCount(12, { timeout: 15_000 });
   const canvas = workstations.locator("canvas");
   const bounds = await canvas.boundingBox();
@@ -77,7 +77,8 @@ test("desktop WebGL overview shows twelve readable stations and can pan, zoom an
     expect(box!.y + box!.height).toBeLessThan(900);
   }
 
-  const scout = workstations.getByRole("button", { name: "Scout workstation · working", exact: true });
+  const scout = workstations.getByRole("button", { name: "Scout workstation", exact: true });
+  await expect(scout).toHaveAccessibleDescription("Status: working");
   const origin = await scout.boundingBox();
   await camera.getByRole("button", { name: "Zoom in" }).click();
   await expect.poll(async () => (await scout.boundingBox())?.x).not.toBe(origin!.x);
@@ -98,7 +99,7 @@ test("desktop WebGL overview shows twelve readable stations and can pan, zoom an
   await camera.getByRole("button", { name: "Reset camera" }).click();
   await expect.poll(async () => (await scout.boundingBox())?.x).toBe(origin!.x);
 
-  await workstations.getByRole("button", { name: "Nova workstation · working" }).click();
+  await workstations.getByRole("button", { name: "Nova workstation" }).click();
   await expect(page.getByRole("region", { name: "Agent details" }).getByRole("heading", { name: "Nova" })).toBeVisible();
   await workstations.getByRole("button", { name: "Switch to 2D" }).click();
   await expect(workstations.getByRole("button", { name: "Nova workstation", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -142,7 +143,7 @@ test("WebGL avatars animate only when visible and motion is allowed", async ({ p
   });
   await page.setViewportSize({ width: 1536, height: 900 });
   await page.goto("/ai-office");
-  await expect(page.getByRole("button", { name: "Scout workstation · working" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Scout workstation" })).toBeVisible();
   const canvas = page.locator(".office-scene canvas");
   const readGl = () => page.evaluate(() => (window as Window & {
     readOfficeGl?: () => { frames: number; draws: number };
@@ -188,8 +189,8 @@ test("orbits through a full turn and switches top and isometric presets", async 
   await page.setViewportSize({ width: 1536, height: 900 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/ai-office");
-  const scout = page.getByRole("button", { name: "Scout workstation · working", exact: true });
-  const quill = page.getByRole("button", { name: "Quill workstation · working", exact: true });
+  const scout = page.getByRole("button", { name: "Scout workstation", exact: true });
+  const quill = page.getByRole("button", { name: "Quill workstation", exact: true });
   await expect(scout).toBeVisible();
   const canvas = page.locator(".office-scene canvas");
   const bounds = (await canvas.boundingBox())!;
