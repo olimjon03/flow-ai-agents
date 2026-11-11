@@ -38,7 +38,7 @@ test("the offline SSE proxy leaves EventSource able to retry", async (t) => {
 test("task proxy guards browser origin and preserves conflict status", async (t) => {
   const fetchMock = t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 409 }));
   const request = (headers: Record<string, string>) =>
-    new Request(tasks, { method: "POST", headers });
+    new Request(tasks, { method: "POST", headers, body: "{}" });
   assert.equal((await POST(request({ "Sec-Fetch-Site": "cross-site" }))).status, 403);
   assert.equal((await POST(request({ "Content-Type": "text/plain" }))).status, 415);
   assert.equal(fetchMock.mock.callCount(), 0);

@@ -2,6 +2,7 @@
 
 import { CheckCircle2, Search, Send, Sparkles } from "lucide-react";
 import { useRef, useState, useSyncExternalStore } from "react";
+import { AgentTaskForm, type AgentTaskInput } from "./agent-task-form";
 import { OfficeViewport } from "./office-viewport";
 import { demoSnapshot } from "../../lib/office/demo";
 import { latestFirst, stageProgress, totalUsage, workflow } from "../../lib/office/model";
@@ -85,6 +86,7 @@ function ActivityList({ activity, names }: {
 
 function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
   const usage = totalUsage(snapshot.agents);
+  const actual = snapshot.source === "backend" && !snapshot.simulation;
 
   return (
     <section className="office-panel office-section" aria-labelledby="usage-title">
@@ -93,12 +95,13 @@ function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
       <dl className="office-usage">
         <div><dt>Requests</dt><dd>{number.format(usage.requests)}</dd></div>
         <div><dt>Tokens</dt><dd>{number.format(usage.inputTokens + usage.outputTokens)}</dd></div>
-        <div><dt>Demo estimated cost</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
+        <div><dt>{actual ? "Estimated OpenAI cost" : "Demo estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
       </dl>
       <p className="office-muted office-usage-note">
         {snapshot.source === "demo"
           ? "Demo rates per 1M tokens · $0.50 input / $1.50 output"
-          : "The local simulation makes no model API calls."}
+          : actual ? "Includes estimates for attempts with unconfirmed usage."
+            : "The local simulation makes no model API calls."}
       </p>
     </section>
   );
@@ -122,24 +125,27 @@ export function Office() {
   const connected = !offline && snapshot.connection === "connected";
   const run = offline ? null : snapshot.run;
   const running = run?.status === "running";
+  const paid = !offline && snapshot.providerMode === "openai";
+  const simulated = offline || snapshot.simulation;
+  const runLabel = run?.mode === "openai" ? "OpenAI workflow" : run?.mode === "mock" ? "Mock workflow" : "Demo workflow";
 
-  async function startDemo() {
-    if (!connected || starting || running) return;
+  async function changeRun(input?: AgentTaskInput, cancelId?: string) {
+    if (!connected || starting || (!cancelId && running)) return;
     setStarting(true);
     setStartError("");
     try {
       const response = await fetch("/api/office/tasks", {
-        method: "POST",
+        method: cancelId ? "DELETE" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: "{}",
+        body: JSON.stringify(cancelId ? { runId: cancelId } : input ?? {}),
         signal: AbortSignal.timeout(6500),
       });
       if (!response.ok) {
         const result = await response.json();
-        setStartError(result.error || "Could not start the demo.");
+        setStartError(result.error || "Could not update the workflow.");
       }
     } catch {
-      setStartError("Could not start the demo. Try again.");
+      setStartError("Could not update the workflow. Try again.");
     } finally {
       setStarting(false);
     }
@@ -159,29 +165,33 @@ export function Office() {
         <div className="office-heading-line">
           <h1>AI Office</h1>
           <div className="office-source">
-            <span className="office-demo">{offline ? "Demo data" : "Demo simulation"}</span>
+            <span className="office-demo">{offline ? "Demo data" : simulated ? "Demo simulation" : "OpenAI execution"}</span>
             <span role="status">
               {offline ? "Simulated activity · No live connection"
-                : connected ? "Live backend · Simulated agents"
-                  : "Disconnected · Last confirmed simulation"}
+                : connected ? simulated ? "Live backend · Simulated agents" : "Live backend · OpenAI agents"
+                  : "Disconnected · Last confirmed state"}
             </span>
           </div>
         </div>
         <p>Explore agent workstations, workflows, and API usage.</p>
         <div className="office-run-controls">
-          <button type="button" className="office-view-button" onClick={startDemo}
+          <button type="button" className="office-view-button" onClick={() => changeRun()}
             disabled={!connected || starting || running}>
             {starting ? "Starting…" : "Start demo task"}
           </button>
+          {running && run && (
+            <button type="button" className="office-view-button" disabled={!connected || starting}
+              onClick={() => changeRun(undefined, run.id)}>Cancel run</button>
+          )}
           <span role="status" className="office-muted">
-            {!connected ? "Connect the local office backend to start a demo."
-              : running ? "Demo workflow running"
-                : run?.status === "completed" ? "Demo workflow completed"
-                  : run?.status === "failed" ? "Demo workflow failed" : "Ready to start"}
+            {!connected ? "Connect the local office backend to start a run."
+              : run ? `${runLabel} ${run.status}` : "Ready to start"}
           </span>
-          {startError && <span role="alert" className="error-text">{startError}</span>}
+          {(startError || run?.error) && <span role="alert" className="error-text">{startError || run?.error}</span>}
         </div>
       </header>
+
+      <AgentTaskForm paid={paid} disabled={!connected || starting || running} onStart={changeRun} />
 
       <div className="office-grid">
         <OfficeViewport agents={snapshot.agents} selectedId={selected?.id} onSelect={selectAgent} fallback={<>
@@ -212,7 +222,7 @@ export function Office() {
           <section id="agent-details" ref={detail} tabIndex={-1}
             className="office-panel office-section" aria-labelledby="details-title">
             <h2 id="details-title">Agent details</h2>
-            <p className="office-muted">Simulated status and activity</p>
+            {simulated && <p className="office-muted">Simulated status and activity</p>}
             {selected ? (
               <>
                 <div className="office-agent-detail" aria-live="polite">
@@ -240,12 +250,19 @@ export function Office() {
       </div>
 
       <div className="office-monitoring">
+        {(run?.script || run?.review) && (
+          <section className="office-panel office-section office-results" aria-labelledby="agent-results-title">
+            <h2 id="agent-results-title">{run.mode === "mock" ? "Mock results" : "Agent results"}</h2>
+            {run.script && <><h3>Script</h3><p>{run.script}</p></>}
+            {run.review && <><h3>Review</h3><p>{run.review}</p></>}
+          </section>
+        )}
         <Workflow agents={snapshot.agents} />
         <div className="office-monitoring-grid">
           <UsagePanel snapshot={snapshot} />
           <section className="office-panel office-section" aria-labelledby="timeline-title">
             <h2 id="timeline-title">Activity timeline</h2>
-            <p className="office-muted">Simulated activity log</p>
+            {simulated && <p className="office-muted">Simulated activity log</p>}
             <ActivityList activity={ordered.slice(0, 4)} names={names} />
           </section>
         </div>
