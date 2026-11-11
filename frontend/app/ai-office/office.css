@@ -239,3 +239,8 @@
 .office-agent-form button:disabled { opacity: .62; cursor: default; }
 .office-results h3 { margin: .7rem 0 .35rem; font-weight: 650; }
 .office-results p { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.office-camera { flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 1.3rem); }
+.office-camera .office-camera-text { width: auto; padding: 0 .55rem; font-size: .72rem; }
+.office-graphics { position: absolute; z-index: 6; bottom: .6rem; right: .65rem; display: flex; gap: .35rem; }
+@media (max-width: 1240px) { .office-camera .office-pan-hint { display: none; } }

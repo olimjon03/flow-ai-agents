@@ -57,3 +57,24 @@ test("submits a mock agent brief and displays the script and review from SSE", a
   await expect(results.getByText(/Mock review/)).toBeVisible();
   await expect(page.getByRole("region", { name: "API usage" }).getByText("$0.000", { exact: true })).toBeVisible();
 });
+
+test("animates backend handoffs once and clears movement when the run is cancelled", async ({ page }) => {
+  test.setTimeout(35_000);
+  await page.setViewportSize({ width: 1536, height: 900 });
+  await page.goto("/ai-office");
+  await expect(page.getByText("Live backend · Simulated agents")).toBeVisible();
+  const nova = page.getByRole("button", { name: /^Nova workstation/ });
+  const muse = page.getByRole("button", { name: /^Muse workstation/ });
+  await expect(nova).toBeVisible();
+  await page.getByRole("button", { name: "Start demo task" }).click();
+  await expect(nova).toHaveAttribute("data-motion", "walking", { timeout: 10_000 });
+  await expect(muse).toHaveAttribute("data-motion", "receiving_task", { timeout: 10_000 });
+  await expect(nova).toHaveAttribute("data-motion", "returning_to_desk", { timeout: 7_000 });
+  await page.getByRole("button", { name: "Cancel run" }).click();
+  await expect(page.getByText("Demo workflow cancelled")).toBeVisible();
+  await expect(nova).not.toHaveAttribute("data-motion", /walking|handing_over_task|returning_to_desk/);
+
+  await page.reload();
+  await expect(page.getByText("Demo workflow cancelled")).toBeVisible();
+  await expect(nova).not.toHaveAttribute("data-motion", /walking|handing_over_task|returning_to_desk/);
+});

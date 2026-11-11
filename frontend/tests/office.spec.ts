@@ -15,7 +15,7 @@ test("opens a clearly labeled demo office and switches the selected workstation"
   await expect(page.getByText("Simulated activity · No live connection")).toBeVisible();
   await expect(page.getByText("Demo data", { exact: true })).toBeVisible();
   const workstations = page.getByRole("region", { name: "Workstations" });
-  await expect(workstations.getByRole("button")).toHaveCount(12);
+  await expect(workstations.getByRole("button", { name: /workstation$/ })).toHaveCount(12);
   for (const status of ["idle", "queued", "working", "completed", "failed"]) {
     await expect(workstations.getByText(status, { exact: true }).first()).toBeVisible();
   }
@@ -85,9 +85,9 @@ test("desktop WebGL overview shows twelve readable stations and can pan, zoom an
   await expect.poll(async () => (await scout.boundingBox())?.x).toBe(origin!.x);
 
   await page.mouse.move(bounds!.x + 45, bounds!.y + 45);
-  await page.mouse.down();
+  await page.mouse.down({ button: "right" });
   await page.mouse.move(bounds!.x + 80, bounds!.y + 55, { steps: 5 });
-  await page.mouse.up();
+  await page.mouse.up({ button: "right" });
   await expect.poll(async () => (await scout.boundingBox())?.x).not.toBe(origin!.x);
   await camera.getByRole("button", { name: "Reset camera" }).click();
   await expect.poll(async () => (await scout.boundingBox())?.x).toBe(origin!.x);
@@ -182,4 +182,42 @@ test("WebGL avatars animate only when visible and motion is allowed", async ({ p
     await new Promise((resolve) => setTimeout(resolve, 250));
     return (await readGl()).frames - before.frames;
   }).toBe(0);
+});
+
+test("orbits through a full turn and switches top and isometric presets", async ({ page }) => {
+  await page.setViewportSize({ width: 1536, height: 900 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/ai-office");
+  const scout = page.getByRole("button", { name: "Scout workstation · working", exact: true });
+  const quill = page.getByRole("button", { name: "Quill workstation · working", exact: true });
+  await expect(scout).toBeVisible();
+  const canvas = page.locator(".office-scene canvas");
+  const bounds = (await canvas.boundingBox())!;
+  const readOrder = async () => (await scout.boundingBox())!.x - (await quill.boundingBox())!.x;
+  const initial = await readOrder();
+
+  async function halfTurn() {
+    const x = bounds.x + 22;
+    const y = bounds.y + 44;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + bounds.height / 2, y, { steps: 8 });
+    await page.mouse.up();
+  }
+
+  await halfTurn();
+  await expect.poll(readOrder).toBeGreaterThan(0);
+  await halfTurn();
+  await expect.poll(readOrder).toBeLessThan(0);
+  expect(Math.abs(await readOrder() - initial)).toBeLessThan(5);
+
+  const initialY = (await scout.boundingBox())!.y;
+  await page.getByRole("button", { name: "Top view" }).click();
+  await expect.poll(async () => (await scout.boundingBox())!.y).not.toBe(initialY);
+  await page.getByRole("button", { name: "Isometric" }).click();
+  await expect.poll(async () => (await scout.boundingBox())!.y).toBe(initialY);
+  await page.getByRole("button", { name: "Low graphics" }).click();
+  await expect(page.getByRole("button", { name: "Low graphics" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Transparent walls" }).click();
+  await expect(page.getByRole("button", { name: "Transparent walls" })).toHaveAttribute("aria-pressed", "true");
 });

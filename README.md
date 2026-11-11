@@ -68,6 +68,14 @@ Next.js proxies `POST /api/office/tasks` and `GET /api/office/events` to FastAPI
 
 The office service keeps state in memory and uses one Uvicorn worker. Restarting it clears the run and activity. Use it on localhost. Persistence and authentication are future integration work. The original draft server remains available independently. If you run its optional OpenAI mode alongside the office, use a different port, such as 8002, and update `FLOW_API_URL`.
 
+### Virtual Office 2.0 controls
+
+Drag with the left mouse button or one finger to orbit through 360°. Right-drag or focus the canvas and use arrow keys to pan. On a touch screen, use two fingers to pan or pinch to zoom. The camera toolbar provides zoom, top view, isometric view and reset. Camera elevation and pan are bounded to keep the camera above the room.
+
+Compact screens start in the 2D view. Use **Switch to 3D** to try WebGL, or return to 2D whenever needed. **Low graphics** uses a 1× pixel ratio, simpler lighting, and renders on demand between handoffs. **Transparent walls** opens the view from the back of the room. The scene pauses when offscreen and honors reduced motion.
+
+Start a demo or run the local agent workflow to see a handoff. FastAPI publishes `task.handoff` when a completed upstream agent gives way to a working downstream agent. The visual uses A* across desk aisles, gestures at the receiver, and returns the sender to its seat. Backend jobs continue independently. The view animates one sender at a time and keeps at most three pending transfers. A reconnect starts from the current snapshot. Cancellation, an interrupted stream, and reduced motion clear the visual sequence.
+
 ## Run the content agents
 
 Open **AI Office → Agent workflow**. Enter a topic, language, style, and duration in seconds (15–600). Select **Run in mock mode** to get a deterministic script and review. The three agents run in order and report status and progress over SSE. **Cancel run** stops the current local workflow. Script and review appear under the office as they become available.

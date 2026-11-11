@@ -1,3 +1,5 @@
+import type { TaskHandoff } from "./handoff.ts";
+
 export type AgentStatus = "idle" | "queued" | "working" | "completed" | "failed" | "cancelled";
 
 export const workflow = [
@@ -61,6 +63,7 @@ export type OfficeSnapshot = OfficeData & (
     simulation: boolean;
     providerMode: ProviderMode;
     run: OfficeRun | null;
+    handoffs?: readonly TaskHandoff[];
   }
 );
 
