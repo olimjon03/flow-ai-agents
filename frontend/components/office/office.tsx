@@ -3,6 +3,7 @@
 import { CheckCircle2, Search, Send, Sparkles } from "lucide-react";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { AgentTaskForm, type AgentTaskInput } from "./agent-task-form";
+import type { TaskHandoff } from "../../lib/office/handoff";
 import { OfficeViewport } from "./office-viewport";
 import { demoSnapshot } from "../../lib/office/demo";
 import { latestFirst, stageProgress, totalUsage, workflow } from "../../lib/office/model";
@@ -10,6 +11,7 @@ import type { Activity, Agent, AgentStatus, OfficeSnapshot } from "../../lib/off
 
 import { createSseOfficeSource } from "../../lib/office/sse";
 
+const noHandoffs: readonly TaskHandoff[] = [];
 const officeSource = createSseOfficeSource("/api/office/events", demoSnapshot);
 const stageIcons = { research: Search, create: Sparkles, review: CheckCircle2, deliver: Send };
 const number = new Intl.NumberFormat("en-US");
@@ -194,7 +196,7 @@ export function Office() {
       <AgentTaskForm paid={paid} disabled={!connected || starting || running} onStart={changeRun} />
 
       <div className="office-grid">
-        <OfficeViewport agents={snapshot.agents} selectedId={selected?.id} onSelect={selectAgent} fallback={<>
+        <OfficeViewport handoffs={connected ? snapshot.handoffs ?? noHandoffs : noHandoffs} agents={snapshot.agents} selectedId={selected?.id} onSelect={selectAgent} fallback={<>
           {snapshot.agents.length === 0 && <p className="office-muted">No workstations available.</p>}
           <div className="office-desks">
             {snapshot.agents.map((agent) => (

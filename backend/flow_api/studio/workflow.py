@@ -64,6 +64,13 @@ class Studio:
         project["activity"].insert(0, {"at": now(), "stage": stage, "status": status, "message": message})
         del project["activity"][120:]
         self.office.update_agent(DESKS[stage], status, progress, message)
+        if status == "working" and progress == 0:
+            dependencies = {
+                "script": ("research",), "review": ("script",), "storyboard": ("review",),
+                "video": ("image",), "editor": ("video", "voice"),
+            }
+            for predecessor in dependencies.get(stage, ()):
+                self.office.handoff(DESKS[predecessor], DESKS[stage])
         self.save(project)
         self.office.publish()
 

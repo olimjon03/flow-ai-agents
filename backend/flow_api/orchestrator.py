@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -71,6 +72,8 @@ class DemoOrchestrator:
         self.worker = None
         self.updated_at = now()
         self.subscribers = set()
+        self.handoff_sequence = 0
+        self.handoffs = deque(maxlen=32)
         self.provider = provider or MockProvider(tick_seconds * 2)
         self.max_cost = max_cost if max_cost is not None else budget_limit("0.05")
         self.budget = Budget(self.max_cost)
@@ -78,6 +81,7 @@ class DemoOrchestrator:
     def snapshot(self):
         return {
             "confirmedAt": self.updated_at,
+            "handoffs": list(self.handoffs),
             "simulation": not self.run or self.run.get("mode") != "openai",
             "providerMode": self.provider.mode,
             "usagePeriod": "Current workflow",
@@ -107,6 +111,17 @@ class DemoOrchestrator:
             if queue.full():
                 queue.get_nowait()
             queue.put_nowait(snapshot)
+
+    def handoff(self, sender, receiver):
+        """Record a real dependency transition without awaiting its animation."""
+        if (not self.run or self.run["status"] != "running" or sender == receiver
+                or self.agents[sender].status != "completed" or self.agents[receiver].status != "working"):
+            return
+        self.handoff_sequence += 1
+        self.handoffs.append({
+            "id": uuid4().hex, "sequence": self.handoff_sequence, "runId": self.run["id"],
+            "fromAgentId": sender, "toAgentId": receiver, "at": now(),
+        })
 
     def update_agent(self, agent_id, status, progress, message):
         agent = replace(self.agents[agent_id], status=status, progress=progress)
@@ -138,13 +153,17 @@ class DemoOrchestrator:
 
     async def execute(self):
         try:
+            predecessor = None
             for stage in STAGES:
                 # Publish the queued state before starting the next stage.
                 await asyncio.sleep(self.tick_seconds)
                 members = [agent for agent in self.agents.values() if agent.stage == stage]
                 for agent in members:
                     self.update_agent(agent.id, "working", 0, f"Started: {agent.task}")
+                if predecessor:
+                    self.handoff(predecessor, members[0].id)
                 self.publish()
+                predecessor = members[-1].id
 
                 for progress in (25, 55, 80, 100):
                     await asyncio.sleep(self.tick_seconds)
@@ -187,6 +206,8 @@ class DemoOrchestrator:
         previous = {}
         for index, step in enumerate(STEPS):
             self.update_agent(step.agent_id, "working", 0, f"{step.label} started")
+            if index:
+                self.handoff(STEPS[index - 1].agent_id, step.agent_id)
             self.publish()
 
             def on_retry(message):

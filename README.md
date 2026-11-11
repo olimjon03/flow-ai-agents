@@ -60,13 +60,21 @@ The original prototype is served by Python from its original files. Python serve
 
 ## AI Office
 
-Open [AI Office](http://localhost:3000/ai-office) from the sidebar. On desktop, the elevated orthographic camera fits all 12 workstations on startup. Drag the floor to pan, scroll or use the zoom buttons, and use Reset camera to restore the full floor. Click a desk or its keyboard-accessible nameplate to view the task, progress and recent activity. Switch to 2D from the workstation header. Narrow screens, devices reporting 2 GB of memory or less, and WebGL initialization or context failures use the 2D view. The scene uses shared geometry and materials, capped pixel density, and no post-processing. Reduced-motion mode disables avatar animation.
+Open [AI Office](http://localhost:3000/ai-office) from the sidebar. On desktop, the elevated orthographic camera fits all 12 workstations on startup. Click a desk or its keyboard-accessible nameplate to view the task, progress and recent activity. Switch to 2D from the workstation header. Narrow screens, devices reporting 2 GB of memory or less, and WebGL initialization or context failures start in the 2D view. The scene uses shared geometry and materials, capped pixel density, and no post-processing. Reduced-motion mode disables avatar animation.
 
 With FastAPI running, wait for **Live backend · Simulated agents**, then select **Start demo task**. One local workflow at a time moves through Research, Create, Review and Deliver. The backend assigns tasks, publishes progress and keeps the latest 80 activity entries. The 3D view and the 2D fallback use the same confirmed snapshots. This simulation has zero provider requests, tokens and cost.
 
 Next.js proxies `POST /api/office/tasks` and `GET /api/office/events` to FastAPI. The SSE stream sends complete `office.snapshot` events, so a new connection receives the current state immediately. The server coalesces updates for slow clients. The browser shows the last confirmed simulation as disconnected if the stream breaks and reconnects automatically. Before any confirmed event, the office displays the offline demo preview with illustrative usage and disables task start.
 
 The office service keeps state in memory and uses one Uvicorn worker. Restarting it clears the run and activity. Use it on localhost. Persistence and authentication are future integration work. The original draft server remains available independently. If you run its optional OpenAI mode alongside the office, use a different port, such as 8002, and update `FLOW_API_URL`.
+
+### Virtual Office 2.0 controls
+
+Drag with the left mouse button or one finger to orbit through 360°. Right-drag or focus the canvas and use arrow keys to pan. On a touch screen, use two fingers to pan or pinch to zoom. The camera toolbar provides zoom, top view, isometric view and reset. Camera elevation and pan are bounded to keep the camera above the room.
+
+Compact screens start in the 2D view. Use **Switch to 3D** to try WebGL, or return to 2D whenever needed. **Low graphics** uses a 1× pixel ratio, simpler lighting, and renders on demand between handoffs. **Transparent walls** opens the view from the back of the room. The scene pauses when offscreen and honors reduced motion.
+
+Start a demo or run the local agent workflow to see a handoff. FastAPI publishes `task.handoff` when a completed upstream agent gives way to a working downstream agent. The visual uses A* across desk aisles, gestures at the receiver, and returns the sender to its seat. Backend jobs continue independently. The view animates one sender at a time and keeps at most three pending transfers. A reconnect starts from the current snapshot. Cancellation, an interrupted stream, and reduced motion clear the visual sequence.
 
 ## Run the content agents
 

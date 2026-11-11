@@ -1,3 +1,4 @@
+import { parseHandoff } from "./handoff.ts";
 import { workflow } from "./model.ts";
 import type { Agent, AgentStatus, Activity, OfficeRun, OfficeSnapshot, OfficeSource, Usage } from "./model.ts";
 
@@ -99,7 +100,7 @@ export function createSseOfficeSource(url: string, initial: OfficeSnapshot): Off
 
   function markDisconnected() {
     if (snapshot.source === "backend" && snapshot.connection !== "disconnected") {
-      publish({ ...snapshot, connection: "disconnected" });
+      publish({ ...snapshot, connection: "disconnected", handoffs: [] });
     }
   }
 
@@ -114,8 +115,24 @@ export function createSseOfficeSource(url: string, initial: OfficeSnapshot): Off
           const next = parseOfficeEvent(event.data);
           if (next && (snapshot.source === "demo"
             || Date.parse(next.confirmedAt) >= Date.parse(snapshot.confirmedAt))) {
-            publish(next);
+            const handoffs = snapshot.source === "backend" && snapshot.connection === "connected"
+              && snapshot.run?.id === next.run?.id
+              && (next.run?.status === "running" || next.run?.status === "completed")
+              ? snapshot.handoffs : [];
+            publish({ ...next, handoffs });
           }
+        });
+        let lastSequence = 0;
+        connection.addEventListener("open", () => { lastSequence = 0; });
+        connection.addEventListener("task.handoff", (event: MessageEvent<string>) => {
+          if (event.target !== connection || snapshot.source !== "backend" || snapshot.connection !== "connected") return;
+          const handoff = parseHandoff(event.data);
+          if (!handoff || handoff.sequence <= lastSequence || snapshot.run?.id !== handoff.runId
+            || (snapshot.run.status !== "running" && snapshot.run.status !== "completed")) return;
+          const ids = new Set(snapshot.agents.map(({ id }) => id));
+          if (!ids.has(handoff.fromAgentId) || !ids.has(handoff.toAgentId)) return;
+          lastSequence = handoff.sequence;
+          publish({ ...snapshot, handoffs: [...(snapshot.handoffs ?? []).slice(-3), handoff] });
         });
         connection.addEventListener("error", (event) => {
           if (event.target === connection) markDisconnected();

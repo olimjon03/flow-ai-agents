@@ -86,9 +86,22 @@ def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
     @app.get("/api/office/events", response_class=EventSourceResponse)
     async def events(request: Request):
         office = request.app.state.office
+        cursor = office.handoff_sequence
         async with office.subscribe() as queue:
             while True:
-                yield ServerSentEvent(event="office.snapshot", data=await queue.get(), retry=1500)
+                snapshot = await queue.get()
+                pending = snapshot["handoffs"]
+                yield ServerSentEvent(
+                    event="office.snapshot", data={key: value for key, value in snapshot.items() if key != "handoffs"},
+                    retry=1500,
+                )
+                run = snapshot["run"]
+                for handoff in pending:
+                    if handoff["sequence"] <= cursor:
+                        continue
+                    cursor = handoff["sequence"]
+                    if run and run["id"] == handoff["runId"] and run["status"] in {"running", "completed"}:
+                        yield ServerSentEvent(event="task.handoff", data=handoff)
 
     return app
 
