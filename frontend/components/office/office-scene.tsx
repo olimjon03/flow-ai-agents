@@ -54,9 +54,36 @@ function Camera({ command, reducedMotion }: { command: CameraCommand | null; red
   const camera = useThree((state) => state.camera) as OrthographicCamera;
   const size = useThree((state) => state.size);
   const invalidate = useThree((state) => state.invalidate);
+  const canvas = useThree((state) => state.gl.domElement);
   const controls = useRef<ComponentRef<typeof OrbitControls>>(null);
   const home = useRef({ position: homeDirection.clone(), target: new Vector3(), zoom: 1 });
   const destination = useRef<{ zoom: number; reset: boolean } | null>(null);
+  const handled = useRef<CameraCommand | null>(null);
+
+  useEffect(() => {
+    const orbit = controls.current;
+    if (!orbit) return;
+    canvas.tabIndex = 0;
+    canvas.setAttribute("aria-label", "3D office view. Use arrow keys to pan.");
+    function pan(event: KeyboardEvent) {
+      if (!orbit || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const directions: Record<string, readonly [number, number]> = {
+        ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1],
+      };
+      const direction = directions[event.key];
+      if (!direction || !event.key.startsWith("Arrow")) return;
+      event.preventDefault();
+      destination.current = null;
+      const offset = new Vector3(direction[0], direction[1], 0)
+        .applyQuaternion(camera.quaternion).multiplyScalar(24 / camera.zoom);
+      camera.position.add(offset);
+      orbit.target.add(offset);
+      orbit.update();
+      invalidate();
+    }
+    canvas.addEventListener("keydown", pan);
+    return () => canvas.removeEventListener("keydown", pan);
+  }, [camera, canvas, invalidate]);
 
   useLayoutEffect(() => {
     const orbit = controls.current;
@@ -89,7 +116,8 @@ function Camera({ command, reducedMotion }: { command: CameraCommand | null; red
 
   useEffect(() => {
     const orbit = controls.current;
-    if (!command || !orbit) return;
+    if (!command || !orbit || handled.current === command) return;
+    handled.current = command;
     const reset = command.action === "reset";
     const base = destination.current?.zoom ?? camera.zoom;
     const zoom = reset ? home.current.zoom
@@ -100,6 +128,7 @@ function Camera({ command, reducedMotion }: { command: CameraCommand | null; red
         camera.position.copy(home.current.position);
         orbit.target.copy(home.current.target);
       }
+      destination.current = null;
       camera.zoom = zoom;
       camera.updateProjectionMatrix();
       orbit.update();
@@ -281,34 +310,36 @@ function ProjectNameplates({ agents, labels }: {
   return null;
 }
 
-export default function OfficeScene({ agents, selectedId, onSelect, command, reducedMotion, onUnavailable }: {
+export default function OfficeScene({ agents, selectedId, onSelect, command, reducedMotion, visible, onUnavailable }: {
   agents: readonly Agent[];
   selectedId?: string;
   onSelect: (id: string) => void;
   command: CameraCommand | null;
   reducedMotion: boolean;
+  visible: boolean;
   onUnavailable: () => void;
 }) {
   const labels = useRef(new Map<string, HTMLButtonElement>());
+  const animate = visible && !reducedMotion;
 
   return (
     <div className="office-scene-content">
     <Canvas orthographic dpr={[1, 1.4]} flat
       camera={{ position: [9, 15, 20], near: 0.1, far: 120 }}
       gl={{ alpha: false, antialias: true, powerPreference: "low-power" }}
-      frameloop={reducedMotion ? "demand" : "always"}>
+      frameloop={animate ? "always" : "demand"}>
       <color attach="background" args={["#0d1222"]} />
       <ambientLight intensity={0.95} color="#c4ccff" />
       <directionalLight position={[5, 9, 7]} intensity={2} color="#dad4ff" />
       <directionalLight position={[-5, 4, -4]} intensity={1.7} color="#6954ff" />
       <pointLight position={[3, 4, -4]} intensity={27} distance={15} color="#497bff" />
-      <Camera command={command} reducedMotion={reducedMotion} />
+      <Camera command={command} reducedMotion={!animate} />
       <ContextGuard onUnavailable={onUnavailable} />
       <Floor />
       <ProjectNameplates agents={agents} labels={labels} />
       {agents.map((agent, index) => (
         <Station key={agent.id} agent={agent} index={index} selected={agent.id === selectedId}
-          reducedMotion={reducedMotion} select={() => onSelect(agent.id)} />
+          reducedMotion={!animate} select={() => onSelect(agent.id)} />
       ))}
     </Canvas>
       <div className="office-nameplates">
