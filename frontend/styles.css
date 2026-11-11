@@ -130,7 +130,8 @@ button {
   font-size: clamp(17px, 1.7vw, 26px);
 }
 
-.primary:hover { background: #0a5041; }
+.primary:disabled { opacity: .72; cursor: wait; }
+.primary:not(:disabled):hover { background: #0a5041; }
 .note { color: var(--muted); font-size: clamp(14px, 1.32vw, 21px); line-height: 1.45; }
 .brief .note { margin-top: 14px; }
 

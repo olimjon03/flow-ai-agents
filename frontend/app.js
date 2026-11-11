@@ -4,25 +4,14 @@ const draft = document.querySelector('#draft');
 const emptyState = document.querySelector('#empty');
 const copyButton = document.querySelector('#copy');
 const status = document.querySelector('#status');
-
-const draftTemplates = {
-  post: (text) => [
-    'E’tiborni tortadigan sarlavha yozing.',
-    text,
-    'Mavzuni bitta aniq misol bilan ochib bering.',
-    'Yakunida o‘quvchiga savol bering yoki keyingi qadamni taklif qiling.',
-  ].join('\n\n'),
-  video: (text) => [
-    '0–3 soniya · Kirish\nTomoshabin e’tiborini tortadigan savol yoki jumla ayting.',
-    `3–20 soniya · Asosiy qism\n${text}\nAsosiy fikrni bitta misol yoki kadr bilan ko‘rsating.`,
-    '20–30 soniya · Yakun\nBitta xulosa ayting va tomoshabinga keyingi qadamni taklif qiling.',
-  ].join('\n\n'),
-};
+const generateButton = form.querySelector('button[type=submit]');
 
 brief.addEventListener('input', () => brief.setCustomValidity(''));
 
-form.addEventListener('submit', (event) => {
+form.addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (generateButton.disabled) return;
+
   const text = brief.value.trim();
   if (!text) {
     brief.setCustomValidity('Brif matnini yozing.');
@@ -31,13 +20,40 @@ form.addEventListener('submit', (event) => {
   }
 
   const format = new FormData(form).get('format');
-  draft.value = draftTemplates[format](text);
-  emptyState.hidden = true;
-  draft.hidden = false;
-  copyButton.disabled = false;
-  status.textContent = 'Qoralama tayyor.';
-  draft.focus();
-  draft.setSelectionRange(0, 0);
+  generateButton.disabled = true;
+  generateButton.textContent = 'Tayyorlanmoqda…';
+  draft.readOnly = true;
+  copyButton.disabled = true;
+  status.textContent = 'Qoralama tayyorlanmoqda…';
+
+  try {
+    const response = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brief: text, format }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error('Generation request failed');
+
+    const result = await response.json();
+    if (typeof result.draft !== 'string' || !result.draft.trim()) {
+      throw new Error('Invalid draft');
+    }
+
+    draft.value = result.draft;
+    emptyState.hidden = true;
+    draft.hidden = false;
+    status.textContent = 'Qoralama tayyor.';
+    draft.focus();
+    draft.setSelectionRange(0, 0);
+  } catch {
+    status.textContent = 'Qoralama yaratilmadi. Qayta urinib ko‘ring.';
+  } finally {
+    generateButton.disabled = false;
+    generateButton.textContent = 'Qoralama yaratish';
+    draft.readOnly = false;
+    copyButton.disabled = !draft.value.trim();
+  }
 });
 
 draft.addEventListener('input', () => {
