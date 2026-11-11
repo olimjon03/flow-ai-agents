@@ -7,6 +7,9 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:3100",
     channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
+    launchOptions: process.env.CI ? {
+      args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+    } : undefined,
   },
   webServer: [
     {

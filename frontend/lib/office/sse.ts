@@ -101,7 +101,9 @@ export function createSseOfficeSource(url: string, initial: OfficeSnapshot): Off
             publish(next);
           }
         });
-        connection.addEventListener("error", markDisconnected);
+        connection.addEventListener("error", (event) => {
+          if (event.target === connection) markDisconnected();
+        });
       }
 
       return () => {

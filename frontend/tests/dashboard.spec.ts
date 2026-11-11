@@ -5,7 +5,7 @@ test("all workspace sections open and highlight their navigation item", async ({
   const nav = page.getByRole("navigation", { name: "Workspace" });
 
   for (const label of [
-    "Dashboard", "Create Content", "AI Agents", "Projects", "Storyboard",
+    "Dashboard", "Create Content", "AI Agents", "AI Office", "Projects", "Storyboard",
     "Media Library", "Publishing", "Analytics", "Settings",
   ]) {
     const link = nav.getByRole("link", { name: label, exact: true });
@@ -101,4 +101,19 @@ test("the legacy prototype works and Python does not expose Next.js files", asyn
     const response = await request.get(`http://127.0.0.1:8100${path}`);
     expect(response.status()).toBe(404);
   }
+});
+
+test("original Python API accepts both formats and rejects invalid requests", async ({ request }) => {
+  const endpoint = "http://127.0.0.1:8100/api/generate";
+  for (const format of ["post", "video"]) {
+    const response = await request.post(endpoint, { data: { brief: "O‘zbekcha sinov brifi", format } });
+    expect(response.status()).toBe(200);
+    expect(await response.json()).toMatchObject({
+      draft: expect.stringContaining("O‘zbekcha sinov brifi"),
+      mode: "sample",
+    });
+  }
+  const invalid = await request.post(endpoint, { data: { brief: "Sinov", format: "unknown" } });
+  expect(invalid.status()).toBe(400);
+  expect(await invalid.json()).toHaveProperty("error");
 });

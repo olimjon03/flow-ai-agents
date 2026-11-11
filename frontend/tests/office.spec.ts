@@ -17,6 +17,7 @@ test("opens a clearly labeled demo office and switches the selected workstation"
 
   const details = page.getByRole("region", { name: "Agent details" });
   await expect(details.getByRole("heading", { name: "Scout" })).toBeVisible();
+  await expect(details.getByText("Simulated status and activity")).toBeVisible();
   await page.getByRole("button", { name: "Guard workstation" }).click();
   await expect(details.getByRole("heading", { name: "Guard" })).toBeVisible();
   await expect(details.getByText("Verify source references")).toBeVisible();
@@ -26,7 +27,10 @@ test("opens a clearly labeled demo office and switches the selected workstation"
   await expect(workstations.getByRole("button", { name: "Guard workstation" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("region", { name: "Workflow" }).getByText("1 failed")).toBeVisible();
   await expect(page.getByRole("region", { name: "Activity timeline" }).getByRole("listitem")).toHaveCount(4);
-  await expect(page.getByRole("region", { name: "API usage" }).getByText("$0.1166", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Activity timeline" }).getByText("Simulated activity log")).toBeVisible();
+  const usage = page.getByRole("region", { name: "API usage" });
+  await expect(usage.getByText("Demo estimated cost")).toBeVisible();
+  await expect(usage.getByText("$0.1166", { exact: true })).toBeVisible();
 });
 
 test("office stays within viewport and focuses agent details on mobile", async ({ page }) => {
@@ -83,6 +87,12 @@ test("desktop WebGL overview shows twelve readable stations and can pan, zoom an
   await camera.getByRole("button", { name: "Reset camera" }).click();
   await expect.poll(async () => (await scout.boundingBox())?.x).toBe(origin!.x);
 
+  await canvas.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect.poll(async () => (await scout.boundingBox())?.x).not.toBe(origin!.x);
+  await camera.getByRole("button", { name: "Reset camera" }).click();
+  await expect.poll(async () => (await scout.boundingBox())?.x).toBe(origin!.x);
+
   await workstations.getByRole("button", { name: "Nova workstation · working" }).click();
   await expect(page.getByRole("region", { name: "Agent details" }).getByRole("heading", { name: "Nova" })).toBeVisible();
   await workstations.getByRole("button", { name: "Switch to 2D" }).click();
@@ -100,4 +110,71 @@ test("desktop automatically shows 2D when WebGL cannot initialize", async ({ pag
   await page.goto("/ai-office");
   await expect(page.getByText("3D is unavailable on this device.", { exact: false })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("button", { name: "Scout workstation", exact: true })).toBeVisible();
+});
+
+
+test("WebGL avatars animate only when visible and motion is allowed", async ({ page }) => {
+  await page.addInitScript(() => {
+    const gl = WebGL2RenderingContext.prototype;
+    const clear = gl.clear;
+    let frames = 0;
+    const drawElements = gl.drawElements;
+    const drawArrays = gl.drawArrays;
+    let draws = 0;
+    gl.clear = function (mask) {
+      if (mask & this.COLOR_BUFFER_BIT) frames++;
+      clear.call(this, mask);
+    };
+    gl.drawElements = function (...args) {
+      draws++;
+      drawElements.apply(this, args);
+    };
+    gl.drawArrays = function (...args) {
+      draws++;
+      drawArrays.apply(this, args);
+    };
+    Object.assign(window, { readOfficeGl: () => ({ frames, draws }) });
+  });
+  await page.setViewportSize({ width: 1536, height: 900 });
+  await page.goto("/ai-office");
+  await expect(page.getByRole("button", { name: "Scout workstation · working" })).toBeVisible();
+  const canvas = page.locator(".office-scene canvas");
+  const readGl = () => page.evaluate(() => (window as Window & {
+    readOfficeGl?: () => { frames: number; draws: number };
+  }).readOfficeGl!());
+
+  const first = await canvas.screenshot();
+  const start = await readGl();
+  const startMs = Date.now();
+  await expect.poll(async () => (await readGl()).frames - start.frames).toBeGreaterThanOrEqual(8);
+  const end = await readGl();
+  const elapsed = Date.now() - startMs;
+  const frameCount = end.frames - start.frames;
+  const drawCallsPerFrame = (end.draws - start.draws) / frameCount;
+  console.log(`Office WebGL smoke: ${frameCount} frames in ${elapsed} ms, ~${drawCallsPerFrame.toFixed(0)} draw calls/frame`);
+  expect(drawCallsPerFrame).toBeGreaterThan(0);
+  expect(drawCallsPerFrame).toBeLessThan(500);
+  expect((await canvas.screenshot()).equals(first)).toBe(false);
+
+  await page.evaluate(() => {
+    const spacer = document.createElement("div");
+    spacer.style.height = "200vh";
+    document.body.append(spacer);
+    window.scrollTo(0, document.body.scrollHeight);
+  });
+  await expect.poll(async () => {
+    const before = await readGl();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return (await readGl()).frames - before.frames;
+  }).toBe(0);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const paused = await readGl();
+  await expect.poll(async () => (await readGl()).frames).toBeGreaterThan(paused.frames + 2);
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect.poll(async () => {
+    const before = await readGl();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return (await readGl()).frames - before.frames;
+  }).toBe(0);
 });

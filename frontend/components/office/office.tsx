@@ -90,7 +90,7 @@ function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
       <dl className="office-usage">
         <div><dt>Requests</dt><dd>{number.format(usage.requests)}</dd></div>
         <div><dt>Tokens</dt><dd>{number.format(usage.inputTokens + usage.outputTokens)}</dd></div>
-        <div><dt>Estimated cost</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
+        <div><dt>{snapshot.source === "demo" ? "Demo estimated cost" : "Estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
       </dl>
       {snapshot.source === "demo" && (
         <p className="office-muted office-usage-note">
@@ -172,6 +172,7 @@ export function Office() {
           <section id="agent-details" ref={detail} tabIndex={-1}
             className="office-panel office-section" aria-labelledby="details-title">
             <h2 id="details-title">Agent details</h2>
+            {demo && <p className="office-muted">Simulated status and activity</p>}
             {selected ? (
               <>
                 <div className="office-agent-detail" aria-live="polite">
@@ -204,6 +205,7 @@ export function Office() {
           <UsagePanel snapshot={snapshot} />
           <section className="office-panel office-section" aria-labelledby="timeline-title">
             <h2 id="timeline-title">Activity timeline</h2>
+            {demo && <p className="office-muted">Simulated activity log</p>}
             <ActivityList activity={ordered.slice(0, 4)} names={names} />
           </section>
         </div>

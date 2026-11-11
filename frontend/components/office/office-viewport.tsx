@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { Hand, Minus, Plus, RotateCcw } from "lucide-react";
-import { Component, useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { Agent } from "../../lib/office/model";
 import type { CameraCommand } from "./office-scene";
 
@@ -46,6 +46,40 @@ class SceneBoundary extends Component<{ children: ReactNode; onUnavailable: () =
   }
 }
 
+function ScenePanel({ agents, selectedId, onSelect, reducedMotion, onUnavailable }: {
+  agents: readonly Agent[];
+  selectedId?: string;
+  onSelect: (id: string) => void;
+  reducedMotion: boolean;
+  onUnavailable: () => void;
+}) {
+  const [command, setCommand] = useState<CameraCommand | null>(null);
+  const [visible, setVisible] = useState(true);
+  const scene = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!scene.current || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting));
+    observer.observe(scene.current);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className="office-scene" ref={scene}>
+      <div className="office-camera" role="group" aria-label="Office camera">
+        <span className="office-pan-hint"><Hand size={15} aria-hidden="true" /> Drag or use arrow keys to pan</span>
+        <button type="button" aria-label="Zoom out" onClick={() => setCommand({ action: "out" })}><Minus size={16} aria-hidden="true" /></button>
+        <button type="button" aria-label="Zoom in" onClick={() => setCommand({ action: "in" })}><Plus size={16} aria-hidden="true" /></button>
+        <button type="button" aria-label="Reset camera" onClick={() => setCommand({ action: "reset" })}><RotateCcw size={16} aria-hidden="true" /></button>
+      </div>
+      <SceneBoundary onUnavailable={onUnavailable}>
+        <OfficeScene agents={agents} selectedId={selectedId} onSelect={onSelect}
+          reducedMotion={reducedMotion} visible={visible} command={command} onUnavailable={onUnavailable} />
+      </SceneBoundary>
+    </div>
+  );
+}
+
 export function OfficeViewport({ agents, selectedId, onSelect, fallback }: {
   agents: readonly Agent[];
   selectedId?: string;
@@ -56,7 +90,6 @@ export function OfficeViewport({ agents, selectedId, onSelect, fallback }: {
   const reducedMotion = useSyncExternalStore(subscribeMotion, getMotion, serverMotion);
   const [useList, setUseList] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
-  const [command, setCommand] = useState<CameraCommand | null>(null);
   const onUnavailable = useCallback(() => setUnavailable(true), []);
   const showScene = !compact && !useList && !unavailable;
 
@@ -66,27 +99,14 @@ export function OfficeViewport({ agents, selectedId, onSelect, fallback }: {
       <header className="office-workstation-header">
         <h2 id="workstations-title">Workstations</h2>
         {!compact && !unavailable && (
-          <button type="button" className="office-view-button" onClick={() => {
-            setUseList(!useList);
-            setCommand(null);
-          }}>
+          <button type="button" className="office-view-button" onClick={() => setUseList(!useList)}>
             {showScene ? "Switch to 2D" : "Switch to 3D"}
           </button>
         )}
       </header>
       {showScene ? (
-        <div className="office-scene">
-          <div className="office-camera" role="group" aria-label="Office camera">
-            <span className="office-pan-hint"><Hand size={15} aria-hidden="true" /> Drag to pan</span>
-            <button type="button" aria-label="Zoom out" onClick={() => setCommand({ action: "out" })}><Minus size={16} aria-hidden="true" /></button>
-            <button type="button" aria-label="Zoom in" onClick={() => setCommand({ action: "in" })}><Plus size={16} aria-hidden="true" /></button>
-            <button type="button" aria-label="Reset camera" onClick={() => setCommand({ action: "reset" })}><RotateCcw size={16} aria-hidden="true" /></button>
-          </div>
-          <SceneBoundary onUnavailable={onUnavailable}>
-            <OfficeScene agents={agents} selectedId={selectedId} onSelect={onSelect}
-              reducedMotion={reducedMotion} command={command} onUnavailable={onUnavailable} />
-          </SceneBoundary>
-        </div>
+        <ScenePanel agents={agents} selectedId={selectedId} onSelect={onSelect}
+          reducedMotion={reducedMotion} onUnavailable={onUnavailable} />
       ) : (
         <>
           {unavailable && <p className="office-muted office-fallback-note">3D is unavailable on this device. Showing the 2D office.</p>}
