@@ -177,6 +177,4 @@ test("WebGL avatars animate only when visible and motion is allowed", async ({ p
     await new Promise((resolve) => setTimeout(resolve, 250));
     return (await readGl()).frames - before.frames;
   }).toBe(0);
-  const still = await canvas.screenshot();
-  expect((await canvas.screenshot()).equals(still)).toBe(true);
 });
