@@ -1,6 +1,7 @@
 """Local FastAPI service for the agent office."""
 
 import os
+from pathlib import Path
 from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
@@ -10,13 +11,16 @@ from pydantic import BaseModel, ConfigDict
 
 from .agents import AgentTask, MockProvider, OpenAIProvider, budget_limit
 from .orchestrator import DemoOrchestrator
+from .studio.routes import router as studio_router
+from .studio.store import ProjectStore
+from .studio.workflow import Studio
 
 
 class StartDemo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def create_app(tick_seconds: float = 0.55, provider=None):
+def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with AsyncExitStack() as stack:
@@ -40,12 +44,16 @@ def create_app(tick_seconds: float = 0.55, provider=None):
 
             office = DemoOrchestrator(tick_seconds, selected, cap)
             app.state.office = office
+            root = media_root or os.getenv("FLOW_MEDIA_ROOT") or Path(__file__).resolve().parents[2] / ".flow-media"
+            app.state.studio = Studio(ProjectStore(Path(root)), office)
             try:
                 yield
             finally:
                 await office.close()
 
     app = FastAPI(title="Flow AI Office API", lifespan=lifespan)
+
+    app.include_router(studio_router)
 
     @app.get("/health")
     async def health():
@@ -66,7 +74,13 @@ def create_app(tick_seconds: float = 0.55, provider=None):
 
     @app.delete("/api/office/tasks/{run_id}", status_code=204)
     async def cancel_task(request: Request, run_id: str):
-        if not request.app.state.office.cancel(run_id):
+        office = request.app.state.office
+        studio = request.app.state.studio
+        if studio.active and studio.worker is office.worker and office.run and office.run["id"] == run_id:
+            cancelled = studio.cancel(studio.active["id"])
+        else:
+            cancelled = office.cancel(run_id)
+        if not cancelled:
             raise HTTPException(409, "This run is no longer active.")
 
     @app.get("/api/office/events", response_class=EventSourceResponse)

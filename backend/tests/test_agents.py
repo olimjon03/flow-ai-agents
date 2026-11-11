@@ -1,5 +1,6 @@
 import asyncio
 import json
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -57,9 +58,13 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentApiTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.media = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media.cleanup)
+
     async def test_default_mock_validates_and_returns_script_and_review(self):
         with patch.dict("os.environ", {"FLOW_OFFICE_PROVIDER": "mock", "OPENAI_API_KEY": "unused"}):
-            app = create_app(tick_seconds=0.01)
+            app = create_app(tick_seconds=0.01, media_root=self.media.name)
             async with app.router.lifespan_context(app), httpx.AsyncClient(
                 base_url="http://test", transport=httpx.ASGITransport(app=app)
             ) as client:
@@ -84,7 +89,7 @@ class AgentApiTests(unittest.IsolatedAsyncioTestCase):
             return completed(outputs[len(requests) - 1])
 
         async with httpx.AsyncClient(base_url="https://example.test", transport=httpx.MockTransport(transport)) as upstream:
-            app = create_app(provider=OpenAIProvider(upstream))
+            app = create_app(provider=OpenAIProvider(upstream), media_root=self.media.name)
             async with app.router.lifespan_context(app), httpx.AsyncClient(
                 base_url="http://test", transport=httpx.ASGITransport(app=app)
             ) as client:
@@ -113,7 +118,7 @@ class AgentApiTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(5)
 
         async with httpx.AsyncClient(base_url="https://example.test", transport=httpx.MockTransport(transport)) as upstream:
-            app = create_app(provider=OpenAIProvider(upstream))
+            app = create_app(provider=OpenAIProvider(upstream), media_root=self.media.name)
             async with app.router.lifespan_context(app), httpx.AsyncClient(
                 base_url="http://test", transport=httpx.ASGITransport(app=app)
             ) as client:
