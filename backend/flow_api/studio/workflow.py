@@ -28,6 +28,15 @@ def timestamp(seconds):
     return f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02},000"
 
 
+def mock_script_cues(script, timestamps):
+    # Match the generated timeline at the end so brief text cannot become a cue.
+    pattern = "".join(rf"\n{seconds}s — ([^\n]+)" for seconds in timestamps)
+    match = re.search(pattern + r"\Z", script)
+    if not match:
+        raise MediaError("The mock script does not match the storyboard scene timing.")
+    return match
+
+
 class Studio:
     def __init__(self, store, office, ffmpeg=None):
         self.store = store
@@ -232,10 +241,10 @@ class Studio:
             async def generate(current):
                 result = await provider.generate(step, task, outputs, self.office.budget, lambda _: None)
                 if stage == "script" and brief["durationSeconds"] == 30:
-                    header, opening, main, closing = result.rsplit("\n", 3)
-                    result = "\n".join((header, opening, "6s — Set the scene.",
-                                        main.replace("15s — ", "12s — ", 1),
-                                        "18s — Show the idea in action.", closing.replace("30s — ", "24s — ", 1)))
+                    cues = mock_script_cues(result, (0, 15, 30))
+                    opening, main, closing = cues.groups()
+                    result = "\n".join((result[:cues.start()], f"0s — {opening}", "6s — Set the scene.",
+                                        f"12s — {main}", "18s — Show the idea in action.", f"24s — {closing}"))
                 outputs[step.label] = result
                 if stage in {"script", "review"}:
                     current[stage] = result
@@ -243,11 +252,14 @@ class Studio:
         await self.run_stage(project, "storyboard", self.storyboard)
 
     async def storyboard(self, project):
-        lines = [re.sub(r"^\d+s — ", "", line) for line in project["script"].splitlines() if re.match(r"^\d+s — ", line)]
         duration = project["brief"]["durationSeconds"]
-        labels = ("Opening", "Context", "Main idea", "Visual recap", "Closing") if duration == 30 else (
-            "Opening", "Main idea", "Closing",
-        )
+        if duration == 30:
+            labels = ("Opening", "Context", "Main idea", "Visual recap", "Closing")
+            lines = mock_script_cues(project["script"], range(0, 30, 6)).groups()
+        else:
+            labels = ("Opening", "Main idea", "Closing")
+            lines = [re.sub(r"^\d+s — ", "", line) for line in project["script"].splitlines()
+                     if re.match(r"^\d+s — ", line)]
         count = len(labels)
         if len(lines) != count:
             raise MediaError("The mock script does not match the storyboard scene count.")

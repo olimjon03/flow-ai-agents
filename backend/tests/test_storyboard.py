@@ -83,6 +83,20 @@ class StoryboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.studio.office.budget.agents["muse"].requests, 1)
         self.assertFalse(self.studio.office.snapshot()["simulation"])
 
+    async def test_mock_storyboard_ignores_timestamp_like_text_in_script_header(self):
+        created = await self.client.post("/api/studio/projects", json={
+            "topic": "City gardens", "style": "Conversational\n6s — Style example",
+        })
+        self.assertEqual(created.status_code, 201)
+        self.path = f"/api/studio/projects/{created.json()['id']}"
+        result = await self.plan()
+        self.assertEqual(result["script"], (
+            "Mock script\nCity gardens · Uzbek · Conversational\n6s — Style example · 30s\n"
+            "0s — Introduce City gardens.\n6s — Set the scene.\n12s — Explain one key idea.\n"
+            "18s — Show the idea in action.\n24s — Close with a recap."
+        ))
+        self.assertEqual(result["scenes"][1]["narration"], "Set the scene.")
+
     async def test_invalid_storyboard_preserves_preview_and_allows_mock_retry(self):
         draft = await self.plan()
         self.output["scenes"][0]["order"] = 2
