@@ -7,7 +7,7 @@ type Brief = {
   topic: string; language: string; style: string; durationSeconds: number;
   aspect: string; gender: string; resolution: string; backgroundAudio: boolean;
 };
-type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null };
+type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null; provider?: string };
 type Scene = { id: string; index: number; start: number; duration: number; description: string; narration: string; prompt: string };
 type ProjectSummary = { id: string; topic: string; status: string };
 type Project = {
@@ -16,6 +16,9 @@ type Project = {
   stages: Record<string, { status: string; progress: number }>;
   activity: { at: string; stage: string; message: string }[];
   approval: string; feedback: string | null; scriptApproved: boolean; deployStoryboardAvailable: boolean;
+  imageQuote: { estimatedCostUsd: number; unitCostUsd: number; maxCostUsd: number; combinedMaxEstimateUsd: number | null; officeCapUsd: number } | null;
+  estimatedImageSpendUsd: number;
+  hiveUncertain?: boolean;
 };
 
 const projectsUrl = "/api/studio/projects";
@@ -65,15 +68,33 @@ function ProjectForm({ disabled, onCreate }: { disabled: boolean; onCreate: (bri
   );
 }
 
+function PaidImageConsent({ checked, onChange, disabled, estimate, cap }: {
+  checked: boolean; onChange: (value: boolean) => void; disabled: boolean; estimate: number; cap: number;
+}) {
+  return <label className="studio-check">
+    <input type="checkbox" checked={checked} disabled={disabled}
+      onChange={(event) => onChange(event.target.checked)} />
+    Allow paid Hive images · estimated up to ${estimate.toFixed(3)} · run limit ${cap.toFixed(3)}
+  </label>;
+}
+
 function ProjectView({ project, pending, onAction }: {
   project: Project; pending: boolean; onAction: (action: string, extra?: object) => void;
 }) {
+  const [acknowledgedHive, setAcknowledgedHive] = useState(false);
+  const [paidImages, setPaidImages] = useState(false);
+  const [paidRegeneration, setPaidRegeneration] = useState(false);
   const [paidStoryboard, setPaidStoryboard] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [regenerate, setRegenerate] = useState("script");
   const working = project.status === "working";
+  const canReviewFinal = ["awaiting_approval", "approved", "rejected"].includes(project.status);
   const canApproveScript = ["awaiting_script_approval", "failed", "cancelled"].includes(project.status)
     && !!project.script && project.scenes.length > 0 && !project.scriptApproved;
+  const combined = project.imageQuote?.combinedMaxEstimateUsd ?? null;
+  const combinedOverBudget = paidStoryboard && paidImages && combined !== null
+    && combined > (project.imageQuote?.officeCapUsd ?? 0);
+  const requiresHiveAcknowledgement = !!project.hiveUncertain && (paidImages || paidRegeneration);
   const captions = project.assets.find((asset) => asset.extension === ".vtt");
   const final = project.finalAssetId ? assetUrl(project.id, project.finalAssetId) : null;
 
@@ -82,6 +103,13 @@ function ProjectView({ project, pending, onAction }: {
       <section className="panel studio-panel">
         <div className="studio-title"><h2>{project.brief.topic}</h2><span role="status">{displayStatus(project.status)}</span></div>
         {project.error && <p role="alert" className="error-text">{project.error}</p>}
+        {project.hiveUncertain && !working && <p role="status">A previous Hive image request may have been billed. Check your Hive account before retrying.</p>}
+        {requiresHiveAcknowledgement && <label className="studio-check">
+          <input type="checkbox" checked={acknowledgedHive} disabled={pending}
+            onChange={(event) => setAcknowledgedHive(event.target.checked)} />
+          I acknowledge that resubmitting may incur another Hive charge
+        </label>}
+        {project.estimatedImageSpendUsd > 0 && <p>Estimated Hive image spend · ${project.estimatedImageSpendUsd.toFixed(3)}</p>}
         <ul className="studio-stages">
           {Object.entries(stageLabels).map(([stage, label]) => (
             <li key={stage}><strong>{label}</strong><span>{project.stages[stage].status}</span>
@@ -97,10 +125,20 @@ function ProjectView({ project, pending, onAction }: {
                 onChange={(event) => setPaidStoryboard(event.target.checked)} />
               Allow a paid Deploy DeepSeek storyboard for this script
             </label>}
-            <button disabled={pending} onClick={() => {
+            {project.imageQuote && <PaidImageConsent checked={paidImages} onChange={setPaidImages} disabled={pending}
+              estimate={paidStoryboard ? 5 * project.imageQuote.unitCostUsd : project.imageQuote.estimatedCostUsd}
+              cap={project.imageQuote.maxCostUsd} />}
+            {paidStoryboard && paidImages && combined !== null && <p>
+              Combined reservation up to ${combined.toFixed(4)}. Office run limit ${project.imageQuote?.officeCapUsd.toFixed(4)}.
+              {combinedOverBudget && " Increase the Office run budget or select one paid option."}
+            </p>}
+            <button disabled={pending || combinedOverBudget || (paidImages && requiresHiveAcknowledgement && !acknowledgedHive)} onClick={() => {
               const allowPaid = project.deployStoryboardAvailable && paidStoryboard;
               setPaidStoryboard(false);
-              onAction("approve-script", { allowPaid });
+              setPaidImages(false);
+              setAcknowledgedHive(false);
+              onAction("approve-script", { allowPaid, allowPaidImages: !!project.imageQuote && paidImages,
+                acknowledgeUncertainHive: paidImages && requiresHiveAcknowledgement && acknowledgedHive });
             }}>{project.deployStoryboardAvailable && paidStoryboard ? "Approve script and generate DeepSeek storyboard" : "Approve script and storyboard"}</button>
           </>}
           {working && <button disabled={pending} onClick={() => onAction("cancel")}>Cancel production</button>}
@@ -108,13 +146,23 @@ function ProjectView({ project, pending, onAction }: {
             <form className="studio-actions" onSubmit={(event) => {
               event.preventDefault();
               setPaidStoryboard(false);
-              onAction("regenerate", { stage: regenerate });
+              setPaidImages(false);
+              setPaidRegeneration(false);
+              setAcknowledgedHive(false);
+              onAction("regenerate", {
+                stage: regenerate, allowPaidImages: regenerate === "image" && !!project.imageQuote && paidRegeneration,
+                acknowledgeUncertainHive: paidRegeneration && requiresHiveAcknowledgement && acknowledgedHive,
+              });
             }}>
-              <label>Regenerate stage<select value={regenerate} onChange={(event) => setRegenerate(event.target.value)}>
+              <label>Regenerate stage<select value={regenerate} onChange={(event) => { setRegenerate(event.target.value); setPaidRegeneration(false); setAcknowledgedHive(false); }}>
                 {["script", "image", "voice", "video", "editor"].filter((stage) => stage === "script" || project.scriptApproved)
                   .map((stage) => <option key={stage} value={stage}>{stageLabels[stage]}</option>)}
               </select></label>
-              <button disabled={pending || (!project.scriptApproved && regenerate !== "script")}>Regenerate</button>
+              {regenerate === "image" && project.scriptApproved && project.imageQuote &&
+                <PaidImageConsent checked={paidRegeneration} onChange={setPaidRegeneration} disabled={pending}
+                  estimate={project.imageQuote.estimatedCostUsd} cap={project.imageQuote.maxCostUsd} />}
+              <button disabled={pending || (!project.scriptApproved && regenerate !== "script")
+                || (paidRegeneration && requiresHiveAcknowledgement && !acknowledgedHive)}>Regenerate</button>
             </form>
           )}
           <Link href="/ai-office">Open AI Office</Link>
@@ -131,7 +179,7 @@ function ProjectView({ project, pending, onAction }: {
             return <article key={scene.id}>
               <h3>Scene {scene.index + 1} · {scene.start}–{scene.start + scene.duration}s</h3>
               <p>Voiceover · {scene.narration}</p><p>Visual prompt · {scene.prompt}</p>
-              {image && <img src={assetUrl(project.id, image.id)} alt={`Mock image for scene ${scene.index + 1}`} />}
+              {image && <img src={assetUrl(project.id, image.id)} alt={`${image.provider === "hive" ? "Hive" : "Mock"} image for scene ${scene.index + 1}`} />}
               {video && <video controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
             </article>;
           })}
@@ -149,14 +197,14 @@ function ProjectView({ project, pending, onAction }: {
           </video>
           <div className="studio-actions">
             <a href={`${final}?download=true`}>Download MP4</a>
-            <button disabled={pending || working} onClick={() => onAction("approve")}>Approve final video</button>
+            <button disabled={pending || !canReviewFinal} onClick={() => onAction("approve")}>Approve final video</button>
           </div>
           <form className="studio-actions" onSubmit={(event) => {
             event.preventDefault();
             onAction("reject", { feedback: feedback.trim() });
           }}>
             <label>Rejection feedback<input required maxLength={1000} value={feedback} onChange={(event) => setFeedback(event.target.value)} /></label>
-            <button disabled={pending || working || !feedback.trim()}>Reject final video</button>
+            <button disabled={pending || !canReviewFinal || !feedback.trim()}>Reject final video</button>
           </form>
           {project.feedback && <p>Feedback · {project.feedback}</p>}
         </> : <p>{working ? "Production in progress" : "No final MP4 yet"}</p>}
@@ -229,7 +277,7 @@ export function Studio() {
   return (
     <div className="page-frame studio">
       <div className="breadcrumb">Workspace / <span>Media Studio</span></div>
-      <header className="page-heading"><h1>Media Studio</h1><p>Produce and review a local video in mock mode.</p></header>
+      <header className="page-heading"><h1>Media Studio</h1><p>Produce and review a local video. Mock media is the default.</p></header>
       {error && <p role="alert" className="error-text">{error}</p>}
       <ProjectForm disabled={pending} onCreate={(brief) => void mutate(projectsUrl, brief, true)} />
       <div className="studio-layout">

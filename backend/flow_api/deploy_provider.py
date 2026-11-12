@@ -28,6 +28,10 @@ def validate_model(value: str) -> str:
     return value
 
 
+def attempt_cost(prompt: str, output_limit: int) -> int:
+    return (len(prompt.encode("utf-8")) + 1024) * RATES[0] + output_limit * RATES[1]
+
+
 class DeployProvider:
     mode = "deploy"
 
@@ -48,9 +52,8 @@ class DeployProvider:
             "max_completion_tokens": output_limit,
             "reasoning_effort": "none",
         }
-        input_bound = len(prompt.encode("utf-8")) + 1024
         for attempt in range(self.retries + 1):
-            reservation = budget.reserve(agent_id, input_bound, output_limit, RATES)
+            reservation = budget.reserve_amount(agent_id, attempt_cost(prompt, output_limit))
             try:
                 return await self.attempt(agent_id, payload, budget, reservation)
             except RetryableAgentError as error:
