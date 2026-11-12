@@ -5,10 +5,12 @@ import json
 import re
 import sqlite3
 import shutil
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
+from time import time
 
 ID = re.compile(r"[a-f0-9]{32}")
+UPLOAD_DIRECTORY = re.compile(r"\.upload-[a-z0-9_]{8}")
 MEDIA_TYPES = {
     ".png": "image/png",
     ".wav": "audio/wav",
@@ -25,6 +27,34 @@ class ProjectStore:
         self.db = self.root / "projects.sqlite3"
         with closing(self.connect()) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, created TEXT, data TEXT)")
+
+    @contextmanager
+    def upload_slot(self):
+        # The same root-wide lock protects uploads and startup cleanup across workers.
+        with (self.root / ".upload.lock").open("ab") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+            else:
+                yield True
+
+    def recover_uploads(self, *, max_age=24 * 60 * 60):
+        with self.upload_slot() as acquired:
+            if not acquired:
+                return
+            cutoff = time() - max_age
+            for project in self.root.iterdir():
+                if not ID.fullmatch(project.name) or project.is_symlink() or not project.is_dir():
+                    continue
+                for directory in project.glob(".upload-*"):
+                    if not UPLOAD_DIRECTORY.fullmatch(directory.name) or directory.is_symlink():
+                        continue
+                    try:
+                        if directory.is_dir() and directory.stat().st_mtime < cutoff:
+                            shutil.rmtree(directory)
+                    except FileNotFoundError:
+                        continue
 
     def connect(self):
         return sqlite3.connect(self.db, timeout=3)

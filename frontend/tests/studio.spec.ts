@@ -59,6 +59,23 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   expect(stale.status()).toBe(409);
   await page.getByRole("button", { name: "Approve final video" }).click();
   await expect(page.getByRole("status").filter({ hasText: /^approved$/ })).toBeVisible();
+  const importedSource = await page.getByLabel("Scene 1 video").getAttribute("src");
+  const approvedSource = await final.getAttribute("src");
+  for (const stage of ["video", "image"]) {
+    await page.getByLabel("Regenerate stage").selectOption(stage);
+    await expect(page.getByLabel("Replace imported clips with generated clips")).not.toBeChecked();
+    await page.getByRole("button", { name: "Regenerate", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: /^awaiting approval$/ })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByLabel("Scene 1 video")).toHaveAttribute("src", importedSource!);
+    await expect(page.getByRole("link", { name: "Download last approved MP4" }))
+      .toHaveAttribute("href", `${approvedSource}?download=true`);
+    const retained = await request.get(approvedSource!, { headers: { Range: "bytes=0-63" } });
+    expect(retained.status()).toBe(206);
+  }
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^approved$/ })).toBeVisible();
+  const archived = await request.get(approvedSource!, { headers: { Range: "bytes=0-63" } });
+  expect(archived.status()).toBe(206);
   await page.reload();
   await expect(page.getByRole("status").filter({ hasText: /^approved$/ })).toBeVisible();
   await expect(page.getByLabel("Final MP4")).toBeVisible();

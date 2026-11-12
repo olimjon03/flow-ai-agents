@@ -17,7 +17,12 @@ export async function forwardClipImport(request: Request, projectId: string, sce
     return errorResponse("The MP4 exceeds the 32 MiB limit.", 413);
   }
   if (!request.body) return errorResponse("An MP4 file is required.", 400);
-  const expectedExport = new URL(request.url).searchParams.get("expected_export");
+  const params = new URL(request.url).searchParams;
+  const expectedExport = params.get("expected_export");
+  const confirmReplace = params.get("confirm_replace");
+  if (confirmReplace !== null && confirmReplace !== "yes") {
+    return errorResponse("Invalid imported clip confirmation.", 422);
+  }
   if (![projectId, sceneId, expectedExport].every((value) => value !== null && /^[a-f0-9]{32}$/.test(value))) {
     return errorResponse("Invalid project, scene or export ID.", 422);
   }
@@ -26,6 +31,7 @@ export async function forwardClipImport(request: Request, projectId: string, sce
     const upstream = new URL(`/api/studio/projects/${projectId}/scenes/${sceneId}/import`,
       process.env.FLOW_OFFICE_API_URL || "http://127.0.0.1:8001");
     upstream.searchParams.set("expected_export", expectedExport!);
+    if (confirmReplace) upstream.searchParams.set("confirm_replace", confirmReplace);
     const options: RequestInit & { duplex: "half" } = {
       method: "POST", headers: { "Content-Type": "video/mp4" }, body: request.body, duplex: "half",
       cache: "no-store", redirect: "error", signal: AbortSignal.any([request.signal, AbortSignal.timeout(65_000)]),

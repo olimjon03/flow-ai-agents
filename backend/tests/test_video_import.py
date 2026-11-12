@@ -1,13 +1,16 @@
 import asyncio
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
 from flow_api.app import create_app
 from flow_api.studio.media import MediaError
+from flow_api.studio.store import ProjectStore
 
 
 class VideoImportTests(unittest.IsolatedAsyncioTestCase):
@@ -107,3 +110,101 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
             "action": "approve", "reviewedAssetId": project["finalAssetId"],
         })
         self.assertEqual(approved.json()["approvedAssetId"], project["finalAssetId"])
+
+    async def test_hevc_import_corrupt_mp4_and_upload_admission(self):
+        project = await self.prepare()
+        hevc = await self.fixture("libx265")
+        uploading = asyncio.Event()
+        release = asyncio.Event()
+
+        async def body():
+            yield hevc[:32]
+            uploading.set()
+            await release.wait()
+            yield hevc[32:]
+
+        headers = {"Content-Type": "video/mp4"}
+        first = asyncio.create_task(self.client.post(self.route(project), content=body(), headers=headers))
+        try:
+            await asyncio.wait_for(uploading.wait(), 5)
+            other = await self.client.post(self.route(project), content=hevc, headers=headers)
+            self.assertEqual(other.status_code, 429)
+            directory = self.studio.store.directory(project["id"])
+            active, = directory.glob(".upload-*")
+            os.utime(active, (1, 1))
+            ProjectStore(self.studio.store.root).recover_uploads()
+            self.assertTrue(active.is_dir())
+        finally:
+            release.set()
+            accepted = await first
+        self.assertEqual(accepted.status_code, 202)
+        await asyncio.wait_for(self.studio.worker, 35)
+        current = await self.project()
+        self.assertEqual(current["status"], "awaiting_approval", current["error"])
+        self.assertTrue(any(asset.get("provider") == "manual" for asset in current["assets"]))
+
+        ftyp_size = int.from_bytes(hevc[:4], "big")
+        corrupt = hevc[:ftyp_size] + b"corrupt media"
+        unconfirmed = await self.client.post(self.route(current), content=corrupt, headers=headers)
+        self.assertEqual(unconfirmed.status_code, 409)
+        self.assertIn("Confirm", unconfirmed.json()["detail"])
+        response = await self.client.post(self.route(current) + "&confirm_replace=yes", content=corrupt, headers=headers)
+        self.assertEqual(response.status_code, 202)
+        await asyncio.wait_for(self.studio.worker, 35)
+        failed = await self.project()
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["assets"], current["assets"])
+        self.assertEqual(failed["lastApprovedAssetId"], project["finalAssetId"])
+
+        old = directory / ".upload-abcd1234"
+        fresh = directory / ".upload-abcd5678"
+        symlink = directory / ".upload-abcd0000"
+        old.mkdir()
+        fresh.mkdir()
+        symlink.symlink_to(fresh, target_is_directory=True)
+        os.utime(old, (1, 1))
+        ProjectStore(self.studio.store.root).recover_uploads()
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(symlink.is_symlink())
+
+    async def test_regeneration_rollback_on_cancellation_and_invalid_export(self):
+        original = await self.prepare()
+        response = await self.client.post(self.route(original), content=await self.fixture("libx264"),
+                                          headers={"Content-Type": "video/mp4"})
+        self.assertEqual(response.status_code, 202)
+        await asyncio.wait_for(self.studio.worker, 35)
+        imported = await self.project()
+        approved_id = imported["finalAssetId"]
+        self.assertEqual((await self.client.post(self.base + "/actions", json={
+            "action": "approve", "reviewedAssetId": approved_id,
+        })).status_code, 200)
+        approved = await self.project()
+        started = asyncio.Event()
+
+        async def slow_export(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def invalid_export(clips, durations, audio, subtitles, path, duration, background):
+            path.write_bytes(clips[0].read_bytes())  # Real H.264 MP4, with no audio and wrong duration.
+
+        for stage, operation, status in (("video", slow_export, "cancelled"), ("image", invalid_export, "failed")):
+            with self.subTest(stage=stage), patch.object(self.studio.ffmpeg, "export", operation):
+                response = await self.client.post(self.base + "/actions", json={"action": "regenerate", "stage": stage})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["lastApprovedAssetId"], approved_id)
+                worker = self.studio.worker
+                if status == "cancelled":
+                    await asyncio.wait_for(started.wait(), 10)
+                    self.assertEqual((await self.client.post(self.base + "/actions", json={"action": "cancel"})).status_code, 200)
+                    await asyncio.gather(worker, return_exceptions=True)
+                else:
+                    await asyncio.wait_for(worker, 35)
+                project = await self.project()
+                self.assertEqual(project["status"], status, project["error"])
+                if status == "failed":
+                    self.assertIn("staged export", project["error"])
+                self.assertEqual(project["assets"], approved["assets"])
+                self.assertEqual(project["lastApprovedAssetId"], approved_id)
+                self.assertEqual((await self.client.get(f"{self.base}/assets/{approved_id}")).status_code, 200)

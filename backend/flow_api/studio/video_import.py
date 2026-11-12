@@ -30,13 +30,13 @@ class ManualVideoProvider:
         self.ffmpeg = ffmpeg
         self.ffprobe = os.getenv("FLOW_FFPROBE_BIN") or shutil.which("ffprobe")
 
-    async def probe(self, source: Path):
+    async def inspect(self, source: Path, entries: str):
         if not self.ffprobe:
             raise MediaError("ffprobe is missing. Install FFmpeg with ffprobe to import clips.")
         try:
             process = await asyncio.create_subprocess_exec(
                 self.ffprobe, "-v", "error", *LOCAL_INPUT,
-                "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,duration:stream_disposition=attached_pic",
+                "-show_entries", entries,
                 "-of", "json", "-i", str(source), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError:
@@ -63,7 +63,15 @@ class ManualVideoProvider:
         if process.returncode:
             raise MediaError("The MP4 container could not be read.")
         try:
-            info = json.loads(output)
+            return json.loads(output)
+        except ValueError:
+            raise MediaError("The MP4 has invalid stream metadata.") from None
+
+    async def probe(self, source: Path):
+        info = await self.inspect(
+            source, "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,duration:stream_disposition=attached_pic",
+        )
+        try:
             tracks = [track for track in info["streams"] if track["codec_type"] == "video"]
             if len(tracks) != 1 or tracks[0].get("disposition", {}).get("attached_pic", 0):
                 raise MediaError("The MP4 must contain one video track.")
@@ -80,6 +88,26 @@ class ManualVideoProvider:
             raise MediaError("The imported video must be between 0.25 and 120 seconds.")
         if not (2 <= width <= 4096 and 2 <= height <= 4096 and width * height <= 8_847_360 and 0 < fps <= 120):
             raise MediaError("The imported video exceeds supported dimensions or frame rate.")
+
+    async def validate_export(self, source: Path, duration: int, size: tuple[int, int]):
+        verify_mp4_signature(source)
+        info = await self.inspect(source, "format=duration:stream=codec_type,codec_name,width,height,duration")
+        try:
+            streams = {stream["codec_type"]: stream for stream in info["streams"]}
+            video = streams["video"]
+            durations = (float(info["format"]["duration"]), float(video["duration"]),
+                         float(streams["audio"]["duration"]))
+            valid = (len(info["streams"]) == 3 and video["codec_name"] == "h264"
+                     and (video["width"], video["height"]) == size
+                     and streams["audio"]["codec_name"] == "aac"
+                     and streams["subtitle"]["codec_name"] == "mov_text"
+                     and all(math.isfinite(seconds) and abs(seconds - duration) <= 0.15 for seconds in durations))
+        except (ValueError, TypeError, KeyError):
+            valid = False
+        if not valid:
+            raise MediaError("The staged export does not match the expected video, audio, subtitles or duration.")
+        await self.ffmpeg.run("-xerror", "-threads", "2", *LOCAL_INPUT, "-i", source,
+                              "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-")
 
     async def generate(self, source: Path, output: Path, duration: int, size: tuple[int, int]):
         verify_mp4_signature(source)
