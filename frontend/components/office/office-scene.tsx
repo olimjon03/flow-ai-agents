@@ -557,7 +557,8 @@ export default function OfficeScene({ agents, selectedId, onSelect, command, red
               if (element) labels.current.set(agent.id, element);
               else labels.current.delete(agent.id);
             }}
-            aria-label={`${agent.name} workstation · ${agent.status}`}
+            aria-label={`${agent.name} workstation`}
+            aria-description={`Status: ${agent.status}`}
             aria-pressed={agent.id === selectedId} aria-controls="agent-details" onClick={() => onSelect(agent.id)}>
             <i aria-hidden="true" style={{ background: statusColors[agent.status] }} />{agent.name}
           </button>

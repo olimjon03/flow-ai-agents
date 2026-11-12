@@ -20,7 +20,7 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await page.getByRole("button", { name: "Approve script and storyboard" }).click();
   await expect(page.getByRole("status").filter({ hasText: /^awaiting approval$/ })).toBeVisible({ timeout: 35_000 });
   for (const agent of ["Pixel", "Echo", "Frame", "Relay"]) {
-    await expect(office.getByRole("button", { name: `${agent} workstation · completed`, exact: true })).toBeVisible();
+    await expect(office.getByRole("button", { name: `${agent} workstation`, exact: true })).toHaveAccessibleDescription("Status: completed");
   }
   await office.close();
 
