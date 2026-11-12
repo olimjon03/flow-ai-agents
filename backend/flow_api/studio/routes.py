@@ -28,6 +28,7 @@ class Action(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["start", "approve-script", "approve", "reject", "regenerate", "cancel"]
     stage: Literal["script", "image", "voice", "video", "editor"] | None = None
+    allowPaid: StrictBool = False
     feedback: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)] | None = None
 
     @model_validator(mode="after")
@@ -36,6 +37,8 @@ class Action(BaseModel):
             raise ValueError("Regeneration requires a stage.")
         if (self.action == "reject") != (self.feedback is not None):
             raise ValueError("Rejection requires feedback.")
+        if self.allowPaid and self.action != "approve-script":
+            raise ValueError("Paid consent is only available when approving a script.")
         return self
 
 
@@ -55,6 +58,12 @@ async def read_model(request, model):
         raise HTTPException(422, detail) from None
 
 
+def project_response(request, project):
+    return {**project, "deployStoryboardAvailable": (
+        request.app.state.studio.office.provider.mode == "deploy" and project["brief"]["durationSeconds"] == 30
+    )}
+
+
 def project_for(request, project_id):
     project = request.app.state.studio.store.get(project_id)
     if not project:
@@ -71,19 +80,22 @@ async def projects(request: Request):
 @router.post("/projects", status_code=201)
 async def create(request: Request):
     brief = await read_model(request, Brief)
-    return request.app.state.studio.create(brief.model_dump())
+    return project_response(request, request.app.state.studio.create(brief.model_dump()))
 
 
 @router.get("/projects/{project_id}")
 async def project(request: Request, project_id: str):
-    return project_for(request, project_id)
+    return project_response(request, project_for(request, project_id))
 
 
 @router.post("/projects/{project_id}/actions")
 async def action(request: Request, project_id: str):
     data = await read_model(request, Action)
     try:
-        return request.app.state.studio.action(project_for(request, project_id), data.action, data.stage, data.feedback)
+        updated = request.app.state.studio.action(
+            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid,
+        )
+        return project_response(request, updated)
     except MediaError as error:
         raise HTTPException(409, str(error)) from None
 

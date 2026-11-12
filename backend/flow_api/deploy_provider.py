@@ -39,17 +39,20 @@ class DeployProvider:
 
     async def generate(self, step, task, previous, budget, on_retry):
         instructions, prompt, output_limit = agent_prompt(step, task, previous)
+        return await self.complete(step.agent_id, f"{instructions}\n\n{prompt}", output_limit, budget, on_retry)
+
+    async def complete(self, agent_id, prompt, output_limit, budget, on_retry):
         payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": f"{instructions}\\n\\n{prompt}"}],
+            "messages": [{"role": "user", "content": prompt}],
             "max_completion_tokens": output_limit,
             "reasoning_effort": "none",
         }
-        input_bound = len(payload["messages"][0]["content"].encode("utf-8")) + 1024
+        input_bound = len(prompt.encode("utf-8")) + 1024
         for attempt in range(self.retries + 1):
-            reservation = budget.reserve(step.agent_id, input_bound, output_limit, RATES)
+            reservation = budget.reserve(agent_id, input_bound, output_limit, RATES)
             try:
-                return await self.attempt(step.agent_id, payload, budget, reservation)
+                return await self.attempt(agent_id, payload, budget, reservation)
             except RetryableAgentError as error:
                 if attempt == self.retries:
                     raise

@@ -15,7 +15,7 @@ type Project = {
   scenes: Scene[]; assets: Asset[]; finalAssetId: string | null; error: string | null;
   stages: Record<string, { status: string; progress: number }>;
   activity: { at: string; stage: string; message: string }[];
-  approval: string; feedback: string | null; scriptApproved: boolean;
+  approval: string; feedback: string | null; scriptApproved: boolean; deployStoryboardAvailable: boolean;
 };
 
 const projectsUrl = "/api/studio/projects";
@@ -68,9 +68,12 @@ function ProjectForm({ disabled, onCreate }: { disabled: boolean; onCreate: (bri
 function ProjectView({ project, pending, onAction }: {
   project: Project; pending: boolean; onAction: (action: string, extra?: object) => void;
 }) {
+  const [paidStoryboard, setPaidStoryboard] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [regenerate, setRegenerate] = useState("script");
   const working = project.status === "working";
+  const canApproveScript = ["awaiting_script_approval", "failed", "cancelled"].includes(project.status)
+    && !!project.script && project.scenes.length > 0 && !project.scriptApproved;
   const captions = project.assets.find((asset) => asset.extension === ".vtt");
   const final = project.finalAssetId ? assetUrl(project.id, project.finalAssetId) : null;
 
@@ -88,11 +91,23 @@ function ProjectView({ project, pending, onAction }: {
         </ul>
         <div className="studio-actions">
           {project.status === "draft" && <button disabled={pending} onClick={() => onAction("start")}>Start mock workflow</button>}
-          {project.status === "awaiting_script_approval" && <button disabled={pending} onClick={() => onAction("approve-script")}>Approve script and storyboard</button>}
+          {canApproveScript && <>
+            {project.deployStoryboardAvailable && <label className="studio-check">
+              <input type="checkbox" checked={paidStoryboard} disabled={pending}
+                onChange={(event) => setPaidStoryboard(event.target.checked)} />
+              Allow a paid Deploy DeepSeek storyboard for this script
+            </label>}
+            <button disabled={pending} onClick={() => {
+              const allowPaid = project.deployStoryboardAvailable && paidStoryboard;
+              setPaidStoryboard(false);
+              onAction("approve-script", { allowPaid });
+            }}>{project.deployStoryboardAvailable && paidStoryboard ? "Approve script and generate DeepSeek storyboard" : "Approve script and storyboard"}</button>
+          </>}
           {working && <button disabled={pending} onClick={() => onAction("cancel")}>Cancel production</button>}
           {!working && project.status !== "draft" && (
             <form className="studio-actions" onSubmit={(event) => {
               event.preventDefault();
+              setPaidStoryboard(false);
               onAction("regenerate", { stage: regenerate });
             }}>
               <label>Regenerate stage<select value={regenerate} onChange={(event) => setRegenerate(event.target.value)}>
@@ -115,7 +130,7 @@ function ProjectView({ project, pending, onAction }: {
             const video = project.assets.find((asset) => asset.sceneId === scene.id && asset.extension === ".mp4");
             return <article key={scene.id}>
               <h3>Scene {scene.index + 1} · {scene.start}–{scene.start + scene.duration}s</h3>
-              <p>{scene.description}</p><p>{scene.prompt}</p>
+              <p>Voiceover · {scene.narration}</p><p>Visual prompt · {scene.prompt}</p>
               {image && <img src={assetUrl(project.id, image.id)} alt={`Mock image for scene ${scene.index + 1}`} />}
               {video && <video controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
             </article>;
