@@ -5,11 +5,13 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 
 from flow_api.app import create_app
+from flow_api.studio.flow_browser import DownloadsWatcher, LocalError, import_download
 from flow_api.studio.media import MediaError
 from flow_api.studio.store import ProjectStore
 from flow_api.studio.video_feasibility import OfficialGeminiVideoProvider
@@ -428,3 +430,52 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((asset["videoSource"], asset["sourceDuration"]), ("google_flow_manual", 6))
             self.assertEqual(snapshot["project"]["lastApprovedAssetId"], approved)
             self.assertEqual((await self.client.get(f"{self.base}/assets/{approved}")).content, original.content)
+
+    async def test_terminal_download_import_rejects_wrong_scene_and_preserves_review_on_cancel(self):
+        original = await self.prepare()
+        approved = original["approvedAssetId"]
+        clip = await self.fixture("libx264", size="90x160", duration="6")
+        watcher = DownloadsWatcher(self.root, self.studio.manual_video)
+        self.assertEqual(await watcher.scan(), [])
+        detected, = await watcher.scan()
+        self.assertEqual((detected["state"], detected["duration"]), ("ready", 6))
+        self.assertEqual(detected["sha256"], hashlib.sha256(clip).hexdigest())
+        args = SimpleNamespace(
+            project=original["id"], scene=original["scenes"][0]["id"], export=original["finalAssetId"],
+            confirm_scene=2, file=self.root / detected["file"], sha256=detected["sha256"], replace_asset=None,
+        )
+        with patch.dict(os.environ, {"FLOW_GOOGLE_FLOW_MANUAL": "1"}):
+            with self.assertRaises(LocalError) as failure:
+                await import_download(self.client, args)
+            self.assertEqual(failure.exception.state, "wrong_scene")
+            args.confirm_scene = 1
+
+            result = await import_download(self.client, args)
+            self.assertEqual(result["state"], "completed")
+            operation = (await self.client.get(f"{self.base}/imports/{result['operationId']}")).json()["operation"]
+            self.assertEqual(operation["resultAssetId"], result["assetId"])
+            project = await self.project()
+            stale = await self.client.post(self.base + "/actions", json={"action": "approve", "reviewedAssetId": approved})
+            self.assertEqual(stale.status_code, 409)
+
+            args.export = project["finalAssetId"]
+            args.replace_asset = result["assetId"]
+            started = asyncio.Event()
+
+            async def wait_for_cancel(*args):
+                started.set()
+                await asyncio.Event().wait()
+
+            with patch.object(self.studio.google_flow, "generate", wait_for_cancel):
+                upload = asyncio.create_task(import_download(self.client, args))
+                await asyncio.wait_for(started.wait(), 5)
+                worker = self.studio.worker
+                upload.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await upload
+                await asyncio.gather(worker, return_exceptions=True)
+            rolled_back = await self.project()
+            self.assertEqual(rolled_back["status"], "cancelled")
+            self.assertEqual(rolled_back["assets"], project["assets"])
+            self.assertEqual(rolled_back["lastApprovedAssetId"], approved)
+            self.assertEqual((await self.client.get(f"{self.base}/assets/{approved}")).status_code, 200)
