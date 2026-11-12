@@ -189,3 +189,31 @@ unset flow_api_key
 If both modes should run side by side, add `--port 8001` to the OpenAI command and point `FLOW_API_URL` to port 8001. The server uses `gpt-5.4-mini` by default. Set `OPENAI_MODEL` in the server environment to override it. In OpenAI mode the backend sends the brief to the [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create). Keep the key in the backend environment. Run `python3 backend/server.py` for sample mode.
 
 See [the MVP brief](docs/mvp.md) for the first workflow.
+
+### Assemble a five-scene video locally
+
+Install FFmpeg and ffprobe. Run FastAPI on loopback with proxy headers disabled and start the Next.js frontend:
+
+```bash
+FLOW_STUDIO_MIN_FREE_MIB=1024 python -m uvicorn flow_api.app:app --app-dir backend --host 127.0.0.1 --port 8001 --no-proxy-headers
+```
+
+```bash
+cd frontend
+npm run dev
+```
+
+In Media Studio, create a 30-second 9:16 project with **Uzbek** as the language. Start the mock workflow and approve the script to create a baseline export. Select one H.264 or HEVC MP4 per scene, ideally six seconds and up to 32 MiB each, then click **Import selected clips in scene order**. A single scene also has its own Import button. The queue advances only when the server reports success for that exact import operation and its clip is still active in the requested scene. The first failure stops the queue and keeps the selected files for retry. Replacements require confirmation for the selected file and the current scene clip.
+
+The five 6-second scenes keep their storyboard order. A shorter clip holds its last frame and a longer one is trimmed. The dashboard shows the original and target durations, the sanitized filename, and whether the final export uses imported clips, mock placeholders, or both. Studio keeps its existing audio track and Uzbek subtitles. The current voiceover provider produces a mock tone. Older caption tracks may have unverified language and are labeled accordingly.
+
+The Studio storage panel shows archived export count, tracked archive bytes, and free disk space. The safety floor defaults to 1024 MiB and is configurable with `FLOW_STUDIO_MIN_FREE_MIB`. Below the floor, new renders pause. The floor and incoming-file allowance are checked at admission and stage boundaries. Other processes can consume free space while FFmpeg is running. Approved and archived exports are retained.
+
+#### Manual acceptance checklist
+
+1. Create the baseline Uzbek project and confirm the first export says **Mock-only video**.
+2. Select five moving local MP4s, including one shorter and one longer than six seconds. Start the queue and confirm each scene completes in order. Check the filenames, duration warnings and **All 5 scenes use imported video** label.
+3. Play the final video and check motion, scene order, vertical aspect, audio and Uzbek subtitles. Approve the exact current MP4.
+4. Regenerate Video or Image with the replacement option unchecked. Confirm the five imports and last approved MP4 remain accessible while the replacement awaits approval. Approve the replacement and confirm the archive count increases.
+5. Attempt a replacement and decline the confirmation. Then try an invalid MP4 in a separate attempt. Verify the prior approved export remains downloadable.
+6. With a temporary local media root, set the floor above the available disk space and restart FastAPI. Confirm the storage warning appears and export attempts are rejected while existing exports remain readable.

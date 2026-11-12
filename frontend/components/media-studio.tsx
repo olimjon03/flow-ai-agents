@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { importScenesInOrder, videoSourceLabel, type ImportOperation, type ImportStatus, type SceneImport } from "../lib/scene-import-queue";
 
 type Brief = {
   topic: string; language: string; style: string; durationSeconds: number;
   aspect: string; gender: string; resolution: string; backgroundAudio: boolean;
 };
-type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null; provider?: string };
+type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null; provider?: string;
+  filename?: string | null; language?: string | null; sourceDuration?: number; importedScenes?: number; sceneCount?: number;
+};
 type Scene = { id: string; index: number; start: number; duration: number; description: string; narration: string; prompt: string };
 type ProjectSummary = { id: string; topic: string; status: string };
 type Project = {
@@ -21,6 +24,14 @@ type Project = {
   hiveUncertain?: boolean;
 };
 
+type Storage = { archiveBytes: number; archivedExports: number; freeBytes: number; floorBytes: number; renderPaused: boolean };
+type SceneProgress = Record<string, { status: ImportStatus; message?: string }>;
+
+const importLabels: Record<ImportStatus, string> = {
+  uploading: "Uploading", rendering: "Normalizing and rendering", imported: "Imported", failed: "Import stopped",
+};
+const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+const archiveSize = (bytes: number) => bytes >= 1024 ** 3 ? gib(bytes) : `${(bytes / 1024 ** 2).toFixed(2)} MiB`;
 const projectsUrl = "/api/studio/projects";
 const stageLabels: Record<string, string> = {
   research: "Research", script: "Script", review: "Review", storyboard: "Storyboard",
@@ -29,10 +40,15 @@ const stageLabels: Record<string, string> = {
 const displayStatus = (value: string) => value.replaceAll("_", " ");
 const assetUrl = (projectId: string, assetId: string) => `${projectsUrl}/${projectId}/assets/${assetId}`;
 
-async function request<T>(url: string, signal?: AbortSignal, payload?: object): Promise<T> {
+async function request<T>(url: string, signal?: AbortSignal, payload?: object, digest?: string): Promise<T> {
   const upload = payload instanceof File;
   const response = await fetch(url, payload ? {
-    method: "POST", headers: { "Content-Type": upload ? "video/mp4" : "application/json" },
+    method: "POST",
+    headers: upload ? {
+      "Content-Type": "video/mp4",
+      ...(digest && { "X-Flow-Clip-Sha256": digest }),
+      "X-Flow-Clip-Name": encodeURIComponent(Array.from(payload.name).slice(0, 150).join("")),
+    } : { "Content-Type": "application/json" },
     body: upload ? payload : JSON.stringify(payload), signal,
   } : { signal, cache: "no-store" });
   const result = await response.json();
@@ -80,9 +96,11 @@ function PaidImageConsent({ checked, onChange, disabled, estimate, cap }: {
   </label>;
 }
 
-function ProjectView({ project, pending, onAction, onImport }: {
-  project: Project; pending: boolean; onAction: (action: string, extra?: object) => void;
-  onImport: (sceneId: string, exportId: string, file: File, replace: boolean) => void;
+function ProjectView({ project, pending, renderPaused, importProgress, onAction, onImport, onCancelImport }: {
+  project: Project; pending: boolean; renderPaused: boolean; onAction: (action: string, extra?: object) => void;
+  importProgress: SceneProgress;
+  onImport: (items: SceneImport[], onImported: (item: SceneImport) => void) => void;
+  onCancelImport: () => void;
 }) {
   const [acknowledgedHive, setAcknowledgedHive] = useState(false);
   const [paidImages, setPaidImages] = useState(false);
@@ -91,6 +109,25 @@ function ProjectView({ project, pending, onAction, onImport }: {
   const [feedback, setFeedback] = useState("");
   const [regenerate, setRegenerate] = useState("script");
   const [discardImported, setDiscardImported] = useState(false);
+  const [selectedClips, setSelectedClips] = useState<Record<string, File>>({});
+  const imports = project.scenes.flatMap((scene) => {
+    const file = selectedClips[scene.id];
+    const existing = project.assets.find((asset) => asset.sceneId === scene.id && asset.provider === "manual");
+    return file ? [{ sceneId: scene.id, file, replaceAssetId: existing?.id ?? null }] : [];
+  });
+  function submitImports(items: SceneImport[]) {
+    const replacements = items.filter((item) => item.replaceAssetId).map(({ sceneId, file }) => {
+      const scene = project.scenes.find((item) => item.id === sceneId);
+      return `Scene ${(scene?.index ?? 0) + 1} · ${file.name}`;
+    });
+    if (replacements.length && !window.confirm(`Replace the imported clips for these selections?\n${replacements.join("\n")}`)) return;
+    onImport(items, ({ sceneId, file }) => setSelectedClips((previous) => {
+      if (previous[sceneId] !== file) return previous;
+      const remaining = { ...previous };
+      delete remaining[sceneId];
+      return remaining;
+    }));
+  }
   const hasImported = project.assets.some((asset) => asset.provider === "manual");
   const working = project.status === "working";
   const canReviewFinal = ["awaiting_approval", "approved", "rejected"].includes(project.status);
@@ -100,6 +137,8 @@ function ProjectView({ project, pending, onAction, onImport }: {
   const combinedOverBudget = paidStoryboard && paidImages && combined !== null
     && combined > (project.imageQuote?.officeCapUsd ?? 0);
   const requiresHiveAcknowledgement = !!project.hiveUncertain && (paidImages || paidRegeneration);
+  const activeImport = Object.values(importProgress).some(({ status }) => status === "rendering");
+  const finalAsset = project.assets.find((asset) => asset.id === project.finalAssetId);
   const captions = project.assets.find((asset) => asset.extension === ".vtt");
   const final = project.finalAssetId ? assetUrl(project.id, project.finalAssetId) : null;
   const lastApproved = project.lastApprovedAssetId && project.lastApprovedAssetId !== project.finalAssetId
@@ -139,7 +178,7 @@ function ProjectView({ project, pending, onAction, onImport }: {
               Combined reservation up to ${combined.toFixed(4)}. Office run limit ${project.imageQuote?.officeCapUsd.toFixed(4)}.
               {combinedOverBudget && " Increase the Office run budget or select one paid option."}
             </p>}
-            <button disabled={pending || combinedOverBudget || (paidImages && requiresHiveAcknowledgement && !acknowledgedHive)} onClick={() => {
+            <button disabled={pending || renderPaused || combinedOverBudget || (paidImages && requiresHiveAcknowledgement && !acknowledgedHive)} onClick={() => {
               if (hasImported && !window.confirm("Starting a new storyboard will discard imported clips. Continue?")) return;
               const allowPaid = project.deployStoryboardAvailable && paidStoryboard;
               setPaidStoryboard(false);
@@ -149,7 +188,7 @@ function ProjectView({ project, pending, onAction, onImport }: {
                 acknowledgeUncertainHive: paidImages && requiresHiveAcknowledgement && acknowledgedHive });
             }}>{project.deployStoryboardAvailable && paidStoryboard ? "Approve script and generate DeepSeek storyboard" : "Approve script and storyboard"}</button>
           </>}
-          {working && <button disabled={pending} onClick={() => onAction("cancel")}>Cancel production</button>}
+          {working && <button disabled={pending && !activeImport} onClick={() => pending ? onCancelImport() : onAction("cancel")}>Cancel production</button>}
           {!working && project.status !== "draft" && (
             <form className="studio-actions" onSubmit={(event) => {
               event.preventDefault();
@@ -177,7 +216,7 @@ function ProjectView({ project, pending, onAction, onImport }: {
               {regenerate === "image" && project.scriptApproved && project.imageQuote &&
                 <PaidImageConsent checked={paidRegeneration} onChange={setPaidRegeneration} disabled={pending}
                   estimate={project.imageQuote.estimatedCostUsd} cap={project.imageQuote.maxCostUsd} />}
-              <button disabled={pending || (!project.scriptApproved && regenerate !== "script")
+              <button disabled={pending || (renderPaused && regenerate !== "script") || (!project.scriptApproved && regenerate !== "script")
                 || (paidRegeneration && requiresHiveAcknowledgement && !acknowledgedHive)}>Regenerate</button>
             </form>
           )}
@@ -187,28 +226,48 @@ function ProjectView({ project, pending, onAction, onImport }: {
 
       {project.scenes.length > 0 && <section className="panel studio-panel">
         <h2>Storyboard and editing timeline</h2>
+        {project.brief.aspect === "9:16" && project.finalAssetId && <>
+          <h3>{project.scenes.length === 5 ? "Five-scene MP4 import" : "Scene MP4 import"}</h3>
+          <p>Select a file for each scene, then import them in scene order. Each successful scene is saved before the next upload.</p>
+          <button disabled={pending || working || renderPaused || !imports.length} onClick={() => submitImports(imports)}>Import selected clips in scene order</button>
+        </>}
         {project.script && <details><summary>Script and review</summary><p className="studio-script">{project.script}</p><p className="studio-script">{project.review}</p></details>}
         <div className="studio-scenes">
           {project.scenes.map((scene) => {
             const image = project.assets.find((asset) => asset.sceneId === scene.id && asset.extension === ".png");
             const video = project.assets.find((asset) => asset.sceneId === scene.id && asset.extension === ".mp4");
+            const progress = importProgress[scene.id];
+            const selection = imports.find((item) => item.sceneId === scene.id);
+            const sourceDuration = video?.sourceDuration;
             return <article key={scene.id}>
               <h3>Scene {scene.index + 1} · {scene.start}–{scene.start + scene.duration}s</h3>
+              <p>Target duration · {scene.duration}s</p>
               <p>Voiceover · {scene.narration}</p><p>Visual prompt · {scene.prompt}</p>
               {image && <img src={assetUrl(project.id, image.id)} alt={`${image.provider === "hive" ? "Hive" : "Mock"} image for scene ${scene.index + 1}`} />}
               {video && <video key={video.id} controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
-              {video?.provider === "manual" && <p>Imported MP4</p>}
-              {project.finalAssetId && project.brief.aspect === "9:16" && <label>
-                Import MP4 for scene {scene.index + 1}
-                <input type="file" accept="video/mp4,.mp4" disabled={pending || working} onChange={(event) => {
-                  const file = event.currentTarget.files?.[0];
-                  event.currentTarget.value = "";
-                  const replace = video?.provider === "manual";
-                  if (file && project.finalAssetId && (!replace || window.confirm("Replace this imported clip?"))) {
-                    onImport(scene.id, project.finalAssetId, file, replace);
-                  }
-                }} />
-              </label>}
+              {video?.provider === "manual" ? <>
+                <p>Imported MP4</p>
+                {video.filename && <p>{video.filename}</p>}
+                {sourceDuration !== undefined && Math.abs(sourceDuration - scene.duration) > 1 / 24 && <p>
+                  Source {sourceDuration.toFixed(2)}s → target {scene.duration}s · {sourceDuration > scene.duration ? "trimmed" : "last frame held"}
+                </p>}
+              </> : <p>{video ? "Mock video placeholder" : "No scene clip yet"}</p>}
+              {project.finalAssetId && project.brief.aspect === "9:16" && <>
+                <label>Import MP4 for scene {scene.index + 1}
+                  <input type="file" accept="video/mp4,.mp4" disabled={pending || working} onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) setSelectedClips((previous) => ({ ...previous, [scene.id]: file }));
+                  }} />
+                </label>
+                {selection && <p>Selected · {selection.file.name}</p>}
+                <button disabled={pending || working || renderPaused || !selection} onClick={() => selection && submitImports([selection])}>
+                  Import scene {scene.index + 1}
+                </button>
+              </>}
+              {progress && <p>
+                {importLabels[progress.status]}{progress.message && ` · ${progress.message}`}
+              </p>}
             </article>;
           })}
         </div>
@@ -221,8 +280,11 @@ function ProjectView({ project, pending, onAction, onImport }: {
         <h2>Final export</h2>
         {lastApproved && <a href={`${lastApproved}?download=true`}>Download last approved MP4</a>}
         {final ? <>
+          <p>{videoSourceLabel(finalAsset?.importedScenes, finalAsset?.sceneCount)}</p>
+          <p>Audio · Studio mock tone · no spoken narration</p>
+          {captions && <p>Subtitles · {captions.language || `Unverified language (project setting: ${project.brief.language})`}</p>}
           <video key={final} controls preload="metadata" className="studio-final" aria-label="Final MP4" src={final}>
-            {captions && <track kind="subtitles" label={project.brief.language} src={assetUrl(project.id, captions.id)} default />}
+            {captions && <track kind="subtitles" label={captions.language || "Unverified language"} srcLang={captions.language === "Uzbek" ? "uz" : undefined} src={assetUrl(project.id, captions.id)} default />}
           </video>
           <div className="studio-actions">
             <a href={`${final}?download=true`}>Download MP4</a>
@@ -256,6 +318,20 @@ export function Studio() {
   const [project, setProject] = useState<Project | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [storage, setStorage] = useState<Storage | null>(null);
+  const [importProgress, setImportProgress] = useState<SceneProgress>({});
+  const [importAnnouncement, setImportAnnouncement] = useState("");
+  const activeImportId = useRef<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const refresh = () => void request<Storage>("/api/studio/storage", controller.signal).then((value) => {
+      if (!controller.signal.aborted) setStorage(value);
+    }).catch(() => { if (!controller.signal.aborted) setStorage(null); });
+    refresh();
+    const timer = setInterval(refresh, 15_000);
+    return () => { controller.abort(); clearInterval(timer); };
+  }, [pending, project?.status]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -305,11 +381,63 @@ export function Studio() {
     }
   }
 
+  async function importClips(project: Project, items: SceneImport[], onImported: (item: SceneImport) => void) {
+    setPending(true);
+    setImportProgress({});
+    setError("");
+    try {
+      await importScenesInOrder(items, project, {
+        upload: async ({ sceneId, file, replaceAssetId }, expectedExport) => {
+          if (!file.size || file.size > 32 * 1024 * 1024) {
+            throw new Error("Choose a nonempty MP4 file up to 32 MiB.");
+          }
+          const params = new URLSearchParams({ expected_export: expectedExport });
+          let digest: string | undefined;
+          if (replaceAssetId) {
+            params.set("replace_asset", replaceAssetId);
+            const hash = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+            digest = Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, "0")).join("");
+          }
+          const accepted = await request<Project & { importOperationId: string }>(
+            `${projectsUrl}/${project.id}/scenes/${sceneId}/import?${params}`, undefined, file, digest,
+          );
+          activeImportId.current = accepted.importOperationId;
+          return accepted;
+        },
+        refresh: (operationId) => request<{ operation: ImportOperation; project: Project }>(
+          `${projectsUrl}/${project.id}/imports/${operationId}`,
+        ),
+        update: setProject,
+        report: (sceneId, status, message) => {
+          setImportProgress((previous) => ({ ...previous, [sceneId]: { status, message } }));
+          const scene = project.scenes.find((item) => item.id === sceneId);
+          setImportAnnouncement(`Scene ${(scene?.index ?? 0) + 1}. ${importLabels[status]}${message ? `. ${message}` : ""}`);
+          if (status === "imported") {
+            const imported = items.find((item) => item.sceneId === sceneId);
+            if (imported) onImported(imported);
+          }
+          if (status !== "rendering") activeImportId.current = null;
+        },
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
   return (
     <div className="page-frame studio">
+      <p className="sr-only" aria-live="polite" aria-atomic="true">{importAnnouncement}</p>
       <div className="breadcrumb">Workspace / <span>Media Studio</span></div>
       <header className="page-heading"><h1>Media Studio</h1><p>Produce and review a local video. Mock media is the default.</p></header>
       {error && <p role="alert" className="error-text">{error}</p>}
+      <section className="panel studio-panel" aria-label="Studio storage">
+        <h2>Studio storage</h2>
+        {storage ? <>
+          <p>Archived exports · {storage.archivedExports} · {archiveSize(storage.archiveBytes)}</p>
+          <p>Free disk space · {gib(storage.freeBytes)} · safety floor {gib(storage.floorBytes)}</p>
+          {storage.renderPaused && <p role="alert">Rendering paused. Free disk space before starting another export.</p>}
+        </> : <p>Storage status unavailable</p>}
+      </section>
       <ProjectForm disabled={pending} onCreate={(brief) => void mutate(projectsUrl, brief, true)} />
       <div className="studio-layout">
         <aside className="panel studio-panel"><h2>Projects</h2>
@@ -320,14 +448,15 @@ export function Studio() {
             </button></li>
           ))}</ul>
         </aside>
-        {project && project.id === id && <ProjectView key={project.id} project={project} pending={pending}
+        {project && project.id === id && <ProjectView key={project.id} project={project} pending={pending} renderPaused={!!storage?.renderPaused}
           onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })}
-          onImport={(sceneId, exportId, file, replace) => {
-            if (file.size > 32 * 1024 * 1024) {
-              setError("The MP4 exceeds the 32 MiB limit.");
-              return;
-            }
-            void mutate(`${projectsUrl}/${project.id}/scenes/${sceneId}/import?expected_export=${exportId}${replace ? "&confirm_replace=yes" : ""}`, file);
+          importProgress={importProgress}
+          onImport={(items, onImported) => void importClips(project, items, onImported)}
+          onCancelImport={() => {
+            const operationId = activeImportId.current;
+            if (operationId) void request<Project>(`${projectsUrl}/${project.id}/actions`, undefined, {
+              action: "cancel", cancelImportOperationId: operationId,
+            }).catch((failure) => setError(failure.message));
           }} />}
       </div>
     </div>

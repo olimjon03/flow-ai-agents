@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -41,6 +42,18 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
 
     def route(self, project):
         return f"{self.base}/scenes/{project['scenes'][0]['id']}/import?expected_export={project['finalAssetId']}"
+
+    def replacement(self, project, clip):
+        scene = project["scenes"][0]["id"]
+        existing = next(asset for asset in project["assets"] if asset["sceneId"] == scene and asset.get("provider") == "manual")
+        return (self.route(project) + "&replace_asset=" + existing["id"],
+                {"Content-Type": "video/mp4", "X-Flow-Clip-Sha256": hashlib.sha256(clip).hexdigest()})
+
+    async def operation(self, accepted):
+        operation_id = accepted.json()["importOperationId"]
+        response = await self.client.get(f"{self.base}/imports/{operation_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
 
     async def fixture(self, codec, *, size="160x120", duration="1"):
         path = self.root / f"{codec}.mp4"
@@ -148,11 +161,15 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
         unconfirmed = await self.client.post(self.route(current), content=corrupt, headers=headers)
         self.assertEqual(unconfirmed.status_code, 409)
         self.assertIn("Confirm", unconfirmed.json()["detail"])
-        response = await self.client.post(self.route(current) + "&confirm_replace=yes", content=corrupt, headers=headers)
+        replace_url, confirmed = self.replacement(current, corrupt)
+        response = await self.client.post(replace_url, content=corrupt, headers=confirmed)
         self.assertEqual(response.status_code, 202)
         await asyncio.wait_for(self.studio.worker, 35)
         failed = await self.project()
         self.assertEqual(failed["status"], "failed")
+        snapshot = await self.operation(response)
+        self.assertEqual(snapshot["operation"]["status"], "failed")
+        self.assertIsNone(snapshot["operation"]["resultAssetId"])
         self.assertEqual(failed["assets"], current["assets"])
         self.assertEqual(failed["lastApprovedAssetId"], project["finalAssetId"])
 
@@ -208,3 +225,124 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(project["assets"], approved["assets"])
                 self.assertEqual(project["lastApprovedAssetId"], approved_id)
                 self.assertEqual((await self.client.get(f"{self.base}/assets/{approved_id}")).status_code, 200)
+
+    async def test_five_uzbek_scenes_export_approve_and_preserve_under_storage_floor(self):
+        original = await self.prepare()
+        project = original
+        self.assertEqual(project["brief"]["language"], "Uzbek")
+        self.assertEqual([scene["duration"] for scene in project["scenes"]], [6] * 5)
+        self.assertEqual(project["scenes"][0]["narration"], "Bugun Moving scene haqida gaplashamiz.")
+        clip = await self.fixture("libx264")
+        for index, scene in enumerate(original["scenes"], 1):
+            route = f"{self.base}/scenes/{scene['id']}/import?expected_export={project['finalAssetId']}"
+            uploaded = await self.client.post(route, content=clip, headers={
+                "Content-Type": "video/mp4", "X-Flow-Clip-Name": f"..%2F{index}-sahna.mp4",
+            })
+            self.assertEqual(uploaded.status_code, 202, uploaded.text)
+            await asyncio.wait_for(self.studio.worker, 35)
+            project = await self.project()
+            self.assertEqual(project["status"], "awaiting_approval", project["error"])
+            final = next(a for a in project["assets"] if a["id"] == project["finalAssetId"])
+            self.assertEqual((final["importedScenes"], final["sceneCount"], final["duration"]), (index, 5, 30))
+            imported = next(a for a in project["assets"] if a["sceneId"] == scene["id"] and a.get("provider") == "manual")
+            self.assertEqual(imported["filename"], f"{index}-sahna.mp4")
+            self.assertAlmostEqual(imported["sourceDuration"], 1, places=2)
+            operation = (await self.operation(uploaded))["operation"]
+            self.assertEqual((operation["status"], operation["sceneId"], operation["resultAssetId"]),
+                             ("succeeded", scene["id"], imported["id"]))
+            self.assertEqual(operation["targetAssetId"],
+                             next(asset["id"] for asset in original["assets"] if asset["sceneId"] == scene["id"] and asset["stage"] == "video"))
+        subtitles = next(asset for asset in project["assets"] if asset["extension"] == ".srt")
+        track = await self.client.get(f"{self.base}/assets/{subtitles['id']}")
+        self.assertEqual(track.status_code, 200)
+        for scene in project["scenes"]:
+            self.assertIn(scene["narration"], track.content.decode("utf-8"))
+        approved_id = project["finalAssetId"]
+        approved = await self.client.post(self.base + "/actions", json={"action": "approve", "reviewedAssetId": approved_id})
+        self.assertEqual(approved.status_code, 200)
+        storage = (await self.client.get("/api/studio/storage")).json()
+        self.assertEqual(storage["archivedExports"], 1)
+        self.assertGreater(storage["archiveBytes"], 0)
+        archived = await self.client.get(f"{self.base}/assets/{original['finalAssetId']}")
+        self.assertEqual(archived.status_code, 200)
+
+        with patch.dict(os.environ, {"FLOW_STUDIO_MIN_FREE_MIB": "128"}), patch(
+            "flow_api.studio.store.shutil.disk_usage", return_value=type("Disk", (), {"free": 64 * 1024 * 1024})(),
+        ):
+            storage = (await self.client.get("/api/studio/storage")).json()
+            self.assertTrue(storage["renderPaused"])
+            self.assertEqual(storage["floorBytes"], 128 * 1024 * 1024)
+            replace_url, confirmed = self.replacement(approved.json(), clip)
+            for request in (
+                self.client.post(self.base + "/actions", json={"action": "regenerate", "stage": "video"}),
+                self.client.post(replace_url, content=clip, headers=confirmed),
+            ):
+                blocked = await request
+                self.assertEqual(blocked.status_code, 507, blocked.text)
+                self.assertIn("free disk space", blocked.json()["detail"])
+        self.assertEqual((await self.project())["approvedAssetId"], approved_id)
+        self.assertEqual((await self.client.get(f"{self.base}/assets/{approved_id}")).status_code, 200)
+        self.assertEqual((await self.client.get(f"{self.base}/assets/{original['finalAssetId']}")).content, archived.content)
+
+        self.assertEqual((await self.client.post(self.base + "/actions", json={
+            "action": "regenerate", "stage": "image",
+        })).status_code, 200)
+        await asyncio.wait_for(self.studio.worker, 35)
+        regenerated = await self.project()
+        self.assertEqual(regenerated["status"], "awaiting_approval", regenerated["error"])
+        self.assertEqual(regenerated["lastApprovedAssetId"], approved_id)
+        self.assertEqual({a["id"] for a in regenerated["assets"] if a.get("provider") == "manual"},
+                         {a["id"] for a in project["assets"] if a.get("provider") == "manual"})
+
+    async def test_import_operation_survives_unrelated_exports_and_rejects_stale_confirmation(self):
+        initial = await self.prepare()
+        clip = await self.fixture("libx264")
+        headers = {"Content-Type": "video/mp4"}
+        first = await self.client.post(self.route(initial), content=clip, headers=headers)
+        self.assertEqual(first.status_code, 202)
+        await self.studio.worker
+        first_project = await self.project()
+        url, confirmed = self.replacement(first_project, clip)
+        self.assertEqual((await self.client.post(url, content=clip + b"changed", headers=confirmed)).status_code, 409)
+        second = await self.client.post(url, content=clip, headers=confirmed)
+        self.assertEqual(second.status_code, 202)
+        await self.studio.worker
+        second_project = await self.project()
+        stale = self.route(second_project) + "&" + url.rsplit("&", 1)[1]
+        self.assertEqual((await self.client.post(stale, content=clip, headers=confirmed)).status_code, 409)
+
+        async def delayed(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        started = asyncio.Event()
+        url, confirmed = self.replacement(second_project, clip)
+        with patch.object(self.studio.manual_video, "generate", delayed):
+            third = await self.client.post(url, content=clip, headers=confirmed)
+            self.assertEqual(third.status_code, 202)
+            await asyncio.wait_for(started.wait(), 5)
+            wrong_cancel = await self.client.post(self.base + "/actions", json={
+                "action": "cancel", "cancelImportOperationId": second.json()["importOperationId"],
+            })
+            self.assertEqual(wrong_cancel.status_code, 409)
+            worker = self.studio.worker
+            cancelled = await self.client.post(self.base + "/actions", json={
+                "action": "cancel", "cancelImportOperationId": third.json()["importOperationId"],
+            })
+            self.assertEqual(cancelled.status_code, 200)
+            await asyncio.gather(worker, return_exceptions=True)
+
+        unrelated = await self.client.post(self.base + "/actions", json={"action": "regenerate", "stage": "editor"})
+        self.assertEqual(unrelated.status_code, 200)
+        await self.studio.worker
+        snapshot = await self.operation(third)
+        self.assertEqual(snapshot["operation"]["status"], "cancelled")
+        self.assertIsNone(snapshot["operation"]["resultAssetId"])
+        self.assertEqual(snapshot["project"]["status"], "awaiting_approval")
+        self.assertNotEqual(snapshot["project"]["finalAssetId"], second_project["finalAssetId"])
+        self.assertEqual((await self.operation(first))["operation"]["status"], "succeeded")
+        self.assertNotEqual((await self.operation(first))["operation"]["resultAssetId"],
+                            (await self.operation(second))["operation"]["resultAssetId"])
+        self.assertIsNotNone(ProjectStore(self.studio.store.root).clip_import(
+            second_project["id"], third.json()["importOperationId"],
+        ))

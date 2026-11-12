@@ -1,4 +1,5 @@
 import { forwardClipImport } from "../../../../lib/clip-import-proxy.ts";
+import { localMutationError } from "../../../../lib/local-mutation.ts";
 import { errorResponse, readJsonBody } from "../../../../lib/http-json.ts";
 
 type Context = { params: Promise<{ path: string[] }> };
@@ -9,6 +10,13 @@ async function forward(request: Request, context: Context) {
   const [group, project, resource, asset] = path;
   const reading = request.method === "GET";
   const list = group === "projects" && path.length === 1;
+  const storage = reading && group === "storage" && path.length === 1;
+  const importStatus = reading && group === "projects" && path.length === 4 && id.test(project)
+    && resource === "imports" && id.test(asset);
+  if (storage || importStatus) {
+    const denied = localMutationError(request);
+    if (denied) return denied;
+  }
   const detail = group === "projects" && path.length === 2 && id.test(project);
   const media = group === "projects" && path.length === 4 && id.test(project) && resource === "assets" && id.test(asset);
   if (!reading && group === "projects" && id.test(project) && resource === "scenes"
@@ -16,7 +24,7 @@ async function forward(request: Request, context: Context) {
     return forwardClipImport(request, project, asset);
   }
   const action = group === "projects" && path.length === 3 && id.test(project) && resource === "actions";
-  if (!(list || (reading ? detail || media : action))) return errorResponse("Studio route not found.", 404);
+  if (!(list || (reading ? detail || media || storage || importStatus : action))) return errorResponse("Studio route not found.", 404);
 
   const url = new URL(request.url);
   const headers = new Headers();

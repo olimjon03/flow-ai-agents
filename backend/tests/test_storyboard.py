@@ -85,13 +85,13 @@ class StoryboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mock_storyboard_ignores_timestamp_like_text_in_script_header(self):
         created = await self.client.post("/api/studio/projects", json={
-            "topic": "City gardens", "style": "Conversational\n6s — Style example",
+            "topic": "City gardens", "language": "English", "style": "Conversational\n6s — Style example",
         })
         self.assertEqual(created.status_code, 201)
         self.path = f"/api/studio/projects/{created.json()['id']}"
         result = await self.plan()
         self.assertEqual(result["script"], (
-            "Mock script\nCity gardens · Uzbek · Conversational\n6s — Style example · 30s\n"
+            "Mock script\nCity gardens · English · Conversational\n6s — Style example · 30s\n"
             "0s — Introduce City gardens.\n6s — Set the scene.\n12s — Explain one key idea.\n"
             "18s — Show the idea in action.\n24s — Close with a recap."
         ))

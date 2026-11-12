@@ -217,7 +217,7 @@ class DailyVideo:
                 continue
             if source == "scheduled" and (not settings.enabled or not activated or paused):
                 continue
-            if self.studio.busy():
+            if self.studio.busy() or self.store.disk_status()["renderPaused"]:
                 return
             if project is None:
                 topic = f"Daily video · {job_id[:8]}"

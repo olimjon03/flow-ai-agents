@@ -50,6 +50,7 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await page.getByLabel("Import MP4 for scene 1").setInputFiles({
     name: "motion.mp4", mimeType: "video/mp4", buffer: movingClip,
   });
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
   await expect(page.getByText("Imported MP4", { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("status").filter({ hasText: /^awaiting approval$/ })).toBeVisible();
   const [projectPath, oldDownload] = download!.split("/assets/");
@@ -81,4 +82,157 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await expect(page.getByLabel("Final MP4")).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test("imports five moving clips sequentially and approves the Uzbek export", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto("/media-studio");
+  await page.getByLabel("Topic", { exact: true }).fill("Uzbek five-scene project");
+  await page.getByRole("button", { name: "Create project" }).click();
+  await page.getByRole("button", { name: "Start mock workflow" }).click();
+  await page.getByRole("button", { name: "Approve script and storyboard" }).click();
+  const status = (value: string) => page.getByRole("status").filter({ hasText: new RegExp(`^${value}$`) });
+  await expect(status("awaiting approval")).toBeVisible({ timeout: 35_000 });
+  await expect(page.getByText("Mock-only video · no imported clips")).toBeVisible();
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(status("approved")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Five-scene MP4 import" })).toBeVisible();
+
+  const buffer = execFileSync(process.env.FLOW_FFMPEG_BIN || "ffmpeg", [
+    "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24",
+    "-t", "1", "-c:v", "libx264", "-threads", "2", "-movflags", "frag_keyframe+empty_moov",
+    "-f", "mp4", "pipe:1",
+  ]);
+  const submitted: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/import")) submitted.push(request.url());
+  });
+  for (let scene = 5; scene >= 1; scene--) {
+    await page.getByLabel(`Import MP4 for scene ${scene}`).setInputFiles({
+      name: `sahna-${scene}.mp4`, mimeType: "video/mp4", buffer,
+    });
+  }
+  await page.getByRole("button", { name: "Import selected clips in scene order" }).click();
+  await expect(page.getByText("All 5 scenes use imported video")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText("Imported MP4", { exact: true })).toHaveCount(5);
+  await expect(page.getByText(/Source 1\.00s → target 6s/)).toHaveCount(5);
+  await expect(page.getByText("sahna-5.mp4", { exact: true })).toBeVisible();
+  expect(submitted).toHaveLength(5);
+  expect(new Set(submitted.map((url) => new URL(url).searchParams.get("expected_export"))).size).toBe(5);
+  await expect(page.getByText("Subtitles · Uzbek", { exact: true })).toBeVisible();
+  await expect(page.getByText("Voiceover · Bugun Uzbek five-scene project haqida gaplashamiz.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download last approved MP4" })).toBeVisible();
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(status("approved")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Studio storage" }).getByText(/Archived exports · [1-9]/)).toBeVisible();
+  await page.route("**/api/studio/storage", async (route) => {
+    const response = await route.fetch();
+    const storage = await response.json();
+    await route.fulfill({ json: { ...storage, freeBytes: 0, renderPaused: true } });
+  });
+  await page.reload();
+  await expect(page.getByRole("alert").filter({ hasText: /Rendering paused/ })).toBeVisible();
+  await page.getByLabel("Regenerate stage").selectOption("video");
+  await expect(page.getByRole("button", { name: "Regenerate", exact: true })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "Download MP4", exact: true })).toBeVisible();
+});
+
+test("keeps selected files across unrelated exports, stale confirmation and cancellation", async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await page.goto("/media-studio");
+  await page.getByLabel("Topic", { exact: true }).fill("Concurrent import review");
+  await page.getByRole("button", { name: "Create project" }).click();
+  await page.getByRole("button", { name: "Start mock workflow" }).click();
+  await page.getByRole("button", { name: "Approve script and storyboard" }).click();
+  const status = (value: string) => page.getByRole("status").filter({ hasText: new RegExp(`^${value}$`) });
+  await expect(status("awaiting approval")).toBeVisible({ timeout: 35_000 });
+  const final = page.getByLabel("Final MP4");
+  const projectPath = (await final.getAttribute("src"))!.split("/assets/")[0];
+  const other = await page.context().newPage();
+  await other.goto("/media-studio");
+  const initial = await (await other.request.get(projectPath)).json();
+  const scene = initial.scenes[0].id;
+  const importPath = `${projectPath}/scenes/${scene}/import`;
+  const moving = execFileSync(process.env.FLOW_FFMPEG_BIN || "ffmpeg", [
+    "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24",
+    "-t", "1", "-c:v", "libx264", "-threads", "2", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1",
+  ]);
+  const corrupt = moving.subarray(0, moving.readUInt32BE());
+  const selection = (number: number, name: string, buffer: Buffer) =>
+    page.getByLabel(`Import MP4 for scene ${number}`).setInputFiles({ name, mimeType: "video/mp4", buffer });
+  const announcement = page.locator('p[aria-live="polite"][aria-atomic="true"]');
+  let uploads = 0;
+  page.on("request", (outgoing) => {
+    if (outgoing.method() === "POST" && new URL(outgoing.url()).pathname.endsWith("/import")) uploads++;
+  });
+
+  const polling = "**/api/studio/projects/*/imports/*";
+  await page.route(polling, async (route) => {
+    const operationUrl = new URL(route.request().url()).pathname;
+    await expect.poll(async () => {
+      const result = await other.request.get(operationUrl);
+      return (await result.json()).operation.status;
+    }, { timeout: 20_000 }).toBe("failed");
+    const regenerated = await other.request.post(`${projectPath}/actions`, { data: { action: "regenerate", stage: "editor" } });
+    expect(regenerated.ok()).toBe(true);
+    await expect.poll(async () => (await (await other.request.get(projectPath)).json()).status,
+      { timeout: 20_000 }).toBe("awaiting_approval");
+    const exact = await other.request.get(operationUrl);
+    await route.fulfill({ json: await exact.json() });
+  }, { times: 1 });
+  await selection(1, "broken.mp4", corrupt);
+  await selection(2, "second.mp4", moving);
+  await page.getByRole("button", { name: "Import selected clips in scene order" }).click();
+  await expect(announcement).toContainText("Scene 1. Import stopped", { timeout: 25_000 });
+  await expect(page.getByText("Selected · broken.mp4")).toBeVisible();
+  await expect(page.getByText("Selected · second.mp4")).toBeVisible();
+  expect(uploads).toBe(1);
+  await expect(status("awaiting approval")).toBeVisible();
+
+  await selection(1, "first.mp4", moving);
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
+  await expect(announcement).toHaveText("Scene 1. Imported", { timeout: 20_000 });
+  const imported = await (await other.request.get(projectPath)).json();
+  const oldClip = imported.assets.find((item: { sceneId: string; provider: string }) =>
+    item.sceneId === scene && item.provider === "manual");
+  await selection(1, "local-replacement.mp4", moving);
+  const { createHash } = await import("node:crypto");
+  const digest = createHash("sha256").update(moving).digest("hex");
+  const replaced = await other.request.post(`${importPath}?expected_export=${imported.finalAssetId}&replace_asset=${oldClip.id}`, {
+    data: moving, headers: { "Content-Type": "video/mp4", "X-Flow-Clip-Sha256": digest },
+  });
+  expect(replaced.status()).toBe(202);
+  const operationId = (await replaced.json()).importOperationId;
+  await expect.poll(async () => (await (await other.request.get(`${projectPath}/imports/${operationId}`)).json()).operation.status,
+    { timeout: 20_000 }).toBe("succeeded");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
+  await expect(announcement).toContainText("Scene 1. Import stopped");
+  await expect(page.getByText("Selected · local-replacement.mp4")).toBeVisible();
+
+  const latest = await (await request.get(projectPath)).json();
+  const target = latest.assets.find((item: { sceneId: string; provider: string }) =>
+    item.sceneId === scene && item.provider === "manual");
+  const controlledOperation = "a".repeat(32);
+  let cancelled = false;
+  await page.route(`**${importPath}?*`, (route) =>
+    route.fulfill({ status: 202, json: { ...latest, status: "working", importOperationId: controlledOperation } }));
+  await page.route(`**${projectPath}/actions`, (route) => {
+    expect(route.request().postDataJSON()).toEqual({ action: "cancel", cancelImportOperationId: controlledOperation });
+    cancelled = true;
+    return route.fulfill({ json: latest });
+  });
+  await page.route(polling, (route) => route.fulfill({ json: {
+    project: { ...latest, status: cancelled ? "cancelled" : "working" },
+    operation: { id: controlledOperation, projectId: latest.id, sceneId: scene, targetAssetId: target.id,
+      status: cancelled ? "cancelled" : "working", resultAssetId: null, error: null },
+  } }));
+  await page.reload();
+  await selection(1, "cancelled.mp4", moving);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel production" }).click();
+  await expect(announcement).toContainText("Import cancelled");
+  await expect(page.getByText("Selected · cancelled.mp4")).toBeVisible();
+  await other.close();
 });

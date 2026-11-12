@@ -20,6 +20,10 @@ class MediaError(Exception):
     pass
 
 
+class StorageFull(MediaError):
+    pass
+
+
 @dataclass(frozen=True)
 class ImageRequest:
     prompt: str

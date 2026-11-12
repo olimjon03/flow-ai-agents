@@ -88,6 +88,7 @@ class ManualVideoProvider:
             raise MediaError("The imported video must be between 0.25 and 120 seconds.")
         if not (2 <= width <= 4096 and 2 <= height <= 4096 and width * height <= 8_847_360 and 0 < fps <= 120):
             raise MediaError("The imported video exceeds supported dimensions or frame rate.")
+        return video_duration
 
     async def validate_export(self, source: Path, duration: int, size: tuple[int, int]):
         verify_mp4_signature(source)
@@ -111,7 +112,7 @@ class ManualVideoProvider:
 
     async def generate(self, source: Path, output: Path, duration: int, size: tuple[int, int]):
         verify_mp4_signature(source)
-        await self.probe(source)
+        source_duration = await self.probe(source)
         width, height = size
         filters = (f"fps=24,scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
@@ -122,3 +123,4 @@ class ManualVideoProvider:
             "-t", duration, "-vf", filters, "-c:v", "libx264", "-threads", "2",
             "-preset", "ultrafast", "-movflags", "+faststart", output,
         )
+        return {"sourceDuration": source_duration}
