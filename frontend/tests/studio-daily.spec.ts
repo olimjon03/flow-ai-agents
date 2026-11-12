@@ -12,9 +12,11 @@ test("persists daily settings, gates activation on a dry run and queues a mock v
   await expect(activate).toBeDisabled();
   await panel.getByLabel("Videos per day").selectOption("2");
   await panel.getByLabel("Start time").fill("23:59");
-  await panel.getByLabel("Timezone").fill(new Date().getUTCHours() === 23 ? "Asia/Seoul" : "UTC");
+  const saved = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/daily-video"
+    && response.request().method() === "POST" && response.request().postDataJSON().action === "save");
   await panel.getByRole("button", { name: "Save settings" }).click();
-  await expect(panel.getByRole("button", { name: "Save settings" })).toBeDisabled();
+  expect((await saved).ok()).toBe(true);
   await page.reload();
   await expect(panel.getByLabel("Videos per day")).toHaveValue("2");
   await panel.getByRole("button", { name: "Run dry run" }).click();

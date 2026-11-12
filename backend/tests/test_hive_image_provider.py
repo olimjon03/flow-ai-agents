@@ -296,14 +296,15 @@ class HiveStudioTests(unittest.IsolatedAsyncioTestCase):
 
         self.studio.clips, self.studio.export = clips, export
         self.assertEqual((await self.action("approve-script")).status_code, 200)
-        await self.finish()
-        self.assertEqual((await self.action("approve")).status_code, 200)
+        rendered = await self.finish()
+        self.assertEqual((await self.action("approve", reviewedAssetId=rendered["finalAssetId"])).status_code, 200)
         return (await self.api.get(self.path)).json()
 
     def assert_preserved(self, before, current):
         self.assertEqual(current["assets"], before["assets"])
         self.assertEqual(current["finalAssetId"], before["finalAssetId"])
         self.assertEqual(current["approval"], "approved")
+        self.assertEqual(current["approvedAssetId"], before["finalAssetId"])
         for asset in before["assets"]:
             self.assertIsNotNone(self.studio.store.asset(current, asset["id"]))
 

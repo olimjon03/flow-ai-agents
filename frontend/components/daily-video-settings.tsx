@@ -6,10 +6,15 @@ import { useEffect, useRef, useState } from "react";
 type Settings = { enabled: boolean; daily_limit: number; start_time: string; timezone: string };
 type Snapshot = {
   settings: Settings; activated: boolean; paused: boolean; dry_run_complete: boolean;
+  pending_timezone: { timezone: string; effective_at: string } | null;
   used_today: number; local_date: string;
   profiles: { id: string; name: string; userDataDirectory: string }[];
   jobs: { id: string; profile: string; source: string; state: string }[];
 };
+
+function editableSettings(snapshot: Snapshot): Settings {
+  return { ...snapshot.settings, timezone: snapshot.pending_timezone?.timezone ?? snapshot.settings.timezone };
+}
 
 async function dailyVideo(payload?: object, signal?: AbortSignal): Promise<Snapshot> {
   const response = await fetch("/api/daily-video", payload ? {
@@ -35,7 +40,7 @@ export function DailyVideoSettings() {
         const next = await dailyVideo(undefined, controller.signal);
         if (controller.signal.aborted) return;
         setSnapshot(next);
-        setDraft((current) => current ?? next.settings);
+        setDraft((current) => current ?? editableSettings(next));
       } catch (failure) {
         if (!controller.signal.aborted) setError((failure as Error).message);
       }
@@ -56,7 +61,7 @@ export function DailyVideoSettings() {
         extra = { request_id: requestId.current };
       }
       const next = await dailyVideo({ action, ...extra });
-      if (action === "save") setDraft(next.settings);
+      if (action === "save") setDraft(editableSettings(next));
       if (action === "generate-now") requestId.current = null;
       setSnapshot(next);
     } catch (failure) {
@@ -68,7 +73,7 @@ export function DailyVideoSettings() {
 
   const dirty = !!draft && !!snapshot && (
     draft.enabled !== snapshot.settings.enabled || draft.daily_limit !== snapshot.settings.daily_limit
-    || draft.start_time !== snapshot.settings.start_time || draft.timezone !== snapshot.settings.timezone
+    || draft.start_time !== snapshot.settings.start_time || draft.timezone !== editableSettings(snapshot).timezone
   );
 
   return (
@@ -99,7 +104,7 @@ export function DailyVideoSettings() {
         </form>
         <div className="studio-actions mt-4">
           <button disabled={pending || dirty} onClick={() => void submit("dry-run")}>Run dry run</button>
-          <button disabled={pending || dirty || !snapshot.dry_run_complete || !snapshot.settings.enabled || snapshot.activated}
+          <button disabled={pending || dirty || !snapshot.dry_run_complete || !snapshot.settings.enabled || snapshot.activated || !!snapshot.pending_timezone}
             onClick={() => void submit("activate")}>Activate mock schedule</button>
           <button disabled={pending || !snapshot.activated} onClick={() => void submit(snapshot.paused ? "resume" : "pause")}>
             {snapshot.paused ? "Resume schedule" : "Pause schedule"}
@@ -107,6 +112,10 @@ export function DailyVideoSettings() {
           <button disabled={pending || (snapshot.used_today >= snapshot.settings.daily_limit && !requestId.current)}
             onClick={() => void submit("generate-now")}>Generate Now</button>
         </div>
+        {snapshot.pending_timezone && <p className="mt-3 text-sm">
+          Timezone change to {snapshot.pending_timezone.timezone} takes effect at {snapshot.pending_timezone.effective_at}.
+          Run a new dry run and activate after the change.
+        </p>}
         {snapshot.dry_run_complete && <p className="mt-3 text-sm">Dry run complete. The schedule starts at {snapshot.settings.start_time} ({snapshot.settings.timezone}) and can use up to {snapshot.settings.daily_limit} mock slots per day.</p>}
         <details className="mt-4">
           <summary>Mock Chrome profiles</summary>

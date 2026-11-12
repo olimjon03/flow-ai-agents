@@ -50,7 +50,7 @@ class Replacement:
     lease: BinaryIO
 
 
-ACTIVE_MEDIA = ("assets", "finalAssetId", "approval", "feedback")
+ACTIVE_MEDIA = ("assets", "finalAssetId", "approval", "feedback", "approvedAssetId")
 ACTIVE_PLAN = ("script", "review", "scenes", "scriptApproved")
 STORYBOARD_OUTPUT_LIMIT = 1800
 
@@ -90,7 +90,7 @@ class Studio:
         project["updatedAt"] = now()
         job = self.replacement
         if job and job.project is project:
-            visible = {**project, **{key: job.previous[key] for key in (*ACTIVE_MEDIA, *ACTIVE_PLAN)},
+            visible = {**project, **{key: job.previous.get(key) for key in (*ACTIVE_MEDIA, *ACTIVE_PLAN)},
                        "replacementJob": job.id, "replacementStages": job.previous["stages"]}
             self.store.save_replacement(visible, job.id)
         else:
@@ -128,7 +128,7 @@ class Studio:
                 if project["status"] == "working":
                     project.update(status="cancelled", error="Replacement cancelled.")
                 fields = ACTIVE_MEDIA if project["status"] == "awaiting_script_approval" else (*ACTIVE_MEDIA, *ACTIVE_PLAN, "stages")
-                project.update({key: job.previous[key] for key in fields})
+                project.update({key: job.previous.get(key) for key in fields})
             project.pop("replacementJob", None)
             self.store.save_replacement(project, job.id)
             committed = success
@@ -153,7 +153,7 @@ class Studio:
             "id": project_id or uuid4().hex, "brief": brief, "createdAt": now(), "status": "draft",
             "script": None, "review": None, "scenes": [], "assets": [], "finalAssetId": None,
             "stages": {stage: {"status": "queued", "progress": 0} for stage in DESKS},
-            "activity": [], "approval": "pending", "feedback": None, "scriptApproved": False,
+            "activity": [], "approval": "pending", "approvedAssetId": None, "feedback": None, "scriptApproved": False,
             "error": None,
         }
         if daily_profile is not None:
@@ -188,7 +188,7 @@ class Studio:
     def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset(), daily=False):
         if self.busy():
             raise MediaError("An Office workflow is already running.")
-        project.update(status="working", error=None, approval="pending", feedback=None)
+        project.update(status="working", error=None, approval="pending", feedback=None, approvedAssetId=None)
         self.active = project
         mode = "studio" if paid_images else "deploy" if paid_storyboard else "mock"
         self.office.run = {"id": uuid4().hex, "status": "running", "mode": mode}
@@ -260,7 +260,7 @@ class Studio:
         )
 
     def action(self, project, action, stage, feedback, allow_paid=False, allow_paid_images=False,
-               acknowledge_uncertain=False):
+               acknowledge_uncertain=False, *, reviewed_asset_id=None):
         if allow_paid_images and project.get("hiveUncertain") and not acknowledge_uncertain:
             raise MediaError("A previous Hive attempt may have been billed. Acknowledge it before resubmitting.")
         if action == "cancel":
@@ -309,11 +309,17 @@ class Studio:
                 self.check_paid_images(project, len(project["scenes"]) - len(keep_images))
             return self.regenerate(project, required, required, paid_images=allow_paid_images, keep_images=keep_images)
         if action in {"approve", "reject"} and project["status"] in {"awaiting_approval", "approved", "rejected"}:
-            if not project["finalAssetId"] or not self.store.asset(project, project["finalAssetId"]):
+            if not reviewed_asset_id or reviewed_asset_id != project["finalAssetId"]:
+                raise MediaError("The final export changed. Review the current MP4 before submitting a decision.")
+            if not self.store.asset(project, reviewed_asset_id):
                 raise MediaError("The final MP4 is missing. Regenerate the export.")
             decision = "approved" if action == "approve" else "rejected"
-            project.update(status=decision, approval=decision, feedback=feedback if action == "reject" else None)
-            self.save(project)
+            reviewed = {**project, "status": decision, "approval": decision, "updatedAt": now(),
+                        "approvedAssetId": reviewed_asset_id if action == "approve" else None,
+                        "feedback": feedback if action == "reject" else None}
+            if not self.store.save_review(reviewed, reviewed_asset_id, project["updatedAt"]):
+                raise MediaError("The final export changed. Reload the project and review the current MP4.")
+            project.update(reviewed)
             return project
         raise MediaError("This action is unavailable for the current project state.")
 

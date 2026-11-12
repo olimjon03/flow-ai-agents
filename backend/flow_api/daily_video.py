@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import re
 from contextlib import closing, suppress
 from datetime import datetime, time, timedelta, timezone
+from ipaddress import ip_address
 from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -74,6 +76,9 @@ class DailyVideo:
                     activated INTEGER NOT NULL DEFAULT 0, paused INTEGER NOT NULL DEFAULT 0,
                     dry_run INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS daily_video_timezone_change (
+                    id INTEGER PRIMARY KEY CHECK(id=1), timezone TEXT NOT NULL, effective_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS daily_video_jobs (
                     sequence INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, request_id TEXT UNIQUE,
                     created_at TEXT NOT NULL, profile TEXT NOT NULL, source TEXT NOT NULL,
@@ -84,11 +89,19 @@ class DailyVideo:
             db.execute("INSERT OR IGNORE INTO daily_video_settings(id, settings) VALUES (1, ?)",
                        (Settings().model_dump_json(),))
 
-    def config(self, db):
+    def config(self, db, now):
+        pending = db.execute("SELECT timezone, effective_at FROM daily_video_timezone_change WHERE id=1").fetchone()
         raw, activated, paused, dry_run = db.execute(
             "SELECT settings, activated, paused, dry_run FROM daily_video_settings WHERE id=1"
         ).fetchone()
-        return Settings.model_validate_json(raw), bool(activated), bool(paused), bool(dry_run)
+        settings = Settings.model_validate_json(raw)
+        if pending and now.astimezone(timezone.utc).isoformat() >= pending[1]:
+            settings = settings.model_copy(update={"timezone": pending[0]})
+            db.execute("UPDATE daily_video_settings SET settings=?, activated=0, dry_run=0 WHERE id=1",
+                       (settings.model_dump_json(),))
+            db.execute("DELETE FROM daily_video_timezone_change WHERE id=1")
+            return settings, False, bool(paused), False, None
+        return settings, bool(activated), bool(paused), bool(dry_run), pending
 
     @staticmethod
     def day_bounds(settings, now):
@@ -98,9 +111,11 @@ class DailyVideo:
                        (start + timedelta(days=1)).astimezone(timezone.utc).isoformat())
 
     def snapshot(self):
-        with closing(self.store.connect()) as db:
-            settings, activated, paused, dry_run = self.config(db)
-            local, bounds = self.day_bounds(settings, self.clock())
+        with closing(self.store.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            now = self.clock()
+            settings, activated, paused, dry_run, pending = self.config(db, now)
+            local, bounds = self.day_bounds(settings, now)
             used = self.used(db, bounds)
             jobs = db.execute(
                 "SELECT id, profile, source, state FROM daily_video_jobs ORDER BY sequence DESC LIMIT 8"
@@ -108,6 +123,7 @@ class DailyVideo:
         return {
             "settings": settings.model_dump(), "activated": activated, "paused": paused,
             "dry_run_complete": dry_run, "mode": "mock", "used_today": used,
+            "pending_timezone": {"timezone": pending[0], "effective_at": pending[1]} if pending else None,
             "local_date": local.date().isoformat(), "profiles": MOCK_PROFILES,
             "jobs": [{"id": job_id, "profile": profile, "source": source, "state": state}
                      for job_id, profile, source, state in jobs],
@@ -120,14 +136,26 @@ class DailyVideo:
     def configure(self, action):
         with closing(self.store.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            settings, _, _, dry_run = self.config(db)
+            now = self.clock()
+            settings, _, _, dry_run, pending = self.config(db, now)
             if isinstance(action, SaveSettings):
-                if settings != action.settings:
+                requested = action.settings
+                if requested != settings or pending:
+                    if requested.timezone == settings.timezone:
+                        db.execute("DELETE FROM daily_video_timezone_change WHERE id=1")
+                    else:
+                        _, (_, boundary) = self.day_bounds(settings, now)
+                        db.execute("INSERT INTO daily_video_timezone_change VALUES (1, ?, ?) "
+                                   "ON CONFLICT(id) DO UPDATE SET timezone=excluded.timezone, effective_at=excluded.effective_at",
+                                   (requested.timezone, boundary))
+                    active = requested.model_copy(update={"timezone": settings.timezone})
                     db.execute("UPDATE daily_video_settings SET settings=?, activated=0, dry_run=0 WHERE id=1",
-                               (action.settings.model_dump_json(),))
+                               (active.model_dump_json(),))
             elif action.action == "dry-run":
                 db.execute("UPDATE daily_video_settings SET dry_run=1 WHERE id=1")
             elif action.action == "activate":
+                if pending:
+                    raise MediaError("Wait for the timezone change before activating the schedule.")
                 if not dry_run or not settings.enabled:
                     raise MediaError("Enable scheduling and complete a dry run first.")
                 db.execute("UPDATE daily_video_settings SET activated=1, paused=0 WHERE id=1")
@@ -135,14 +163,14 @@ class DailyVideo:
                 db.execute("UPDATE daily_video_settings SET paused=? WHERE id=1", (int(action.action == "pause"),))
 
     def enqueue(self, request_id=None):
-        now = self.clock()
         with closing(self.store.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            now = self.clock()
             if request_id is not None:
                 existing = db.execute("SELECT id FROM daily_video_jobs WHERE request_id=?", (request_id,)).fetchone()
                 if existing:
                     return existing[0]
-            settings, activated, paused, _ = self.config(db)
+            settings, activated, paused, _, _ = self.config(db, now)
             local, bounds = self.day_bounds(settings, now)
             if request_id is None and (not settings.enabled or not activated or paused
                                        or local.strftime("%H:%M") < settings.start_time):
@@ -164,15 +192,17 @@ class DailyVideo:
             return job_id
 
     def step(self):
-        with closing(self.store.connect()) as db:
-            settings, activated, paused, _ = self.config(db)
+        with closing(self.store.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            now = self.clock()
+            settings, activated, paused, _, _ = self.config(db, now)
             pending = db.execute(
                 "SELECT id, profile, source, created_at FROM daily_video_jobs WHERE state IN ('queued', 'running') ORDER BY sequence"
             ).fetchall()
         if not pending:
             self.enqueue()
             return
-        _, (day_start, day_end) = self.day_bounds(settings, self.clock())
+        _, (day_start, day_end) = self.day_bounds(settings, now)
         for job_id, profile, source, created_at in pending:
             project = self.store.get(job_id)
             if project and project["status"] != "draft":
@@ -223,8 +253,38 @@ async def settings(request: Request):
     return request.app.state.daily_video.snapshot()
 
 
+LOCAL_AUTHORITY = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?", re.IGNORECASE | re.ASCII)
+
+
+def require_local_mutation(request: Request):
+    try:
+        peer = ip_address(request.client.host if request.client else "")
+        peer = getattr(peer, "ipv4_mapped", None) or peer
+        loopback = peer.is_loopback
+    except ValueError:
+        loopback = False
+    hosts = request.headers.getlist("host")
+    authority = LOCAL_AUTHORITY.fullmatch(hosts[0]) if len(hosts) == 1 else None
+    if not loopback or not authority or (authority[1] and not 1 <= int(authority[1]) <= 65535):
+        raise HTTPException(403, "Daily Video settings may only be changed on localhost.")
+    if any(header in request.headers for header in (
+        "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip",
+    )):
+        raise HTTPException(403, "Forwarded Daily Video mutations are not supported.")
+    origins = request.headers.getlist("origin")
+    scheme = request.scope["scheme"]
+    host = hosts[0].lower()
+    default_port = "80" if scheme == "http" else "443"
+    if authority[1] == default_port:
+        host = host.removesuffix(f":{default_port}")
+    expected = f"{scheme}://{host}"
+    if origins and (len(origins) != 1 or origins[0].lower() != expected):
+        raise HTTPException(403, "Cross-origin Daily Video mutations are not supported.")
+
+
 @router.post("")
 async def update(request: Request):
+    require_local_mutation(request)
     data = (await read_model(request, RootModel[Action])).root
     scheduler = request.app.state.daily_video
     try:

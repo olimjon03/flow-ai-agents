@@ -34,6 +34,7 @@ class Action(BaseModel):
     allowPaid: StrictBool = False
     allowPaidImages: StrictBool = False
     acknowledgeUncertainHive: StrictBool = False
+    reviewedAssetId: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")] | None = None
     feedback: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)] | None = None
 
     @model_validator(mode="after")
@@ -42,6 +43,8 @@ class Action(BaseModel):
             raise ValueError("Regeneration requires a stage.")
         if (self.action == "reject") != (self.feedback is not None):
             raise ValueError("Rejection requires feedback.")
+        if (self.action in {"approve", "reject"}) != (self.reviewedAssetId is not None):
+            raise ValueError("Final review requires the reviewed asset ID.")
         if self.allowPaid and self.action != "approve-script":
             raise ValueError("Paid consent is only available when approving a script.")
         if self.allowPaidImages and not (self.action == "approve-script"
@@ -114,7 +117,7 @@ async def action(request: Request, project_id: str):
             raise HTTPException(403, "Paid Hive images are only available on localhost.")
     try:
         updated = request.app.state.studio.action(
-            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages, data.acknowledgeUncertainHive,
+            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages, data.acknowledgeUncertainHive, reviewed_asset_id=data.reviewedAssetId,
         )
         return project_response(request, request.app.state.studio.store.get(updated["id"]))
     except MediaError as error:

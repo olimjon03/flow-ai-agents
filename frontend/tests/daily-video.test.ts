@@ -24,3 +24,18 @@ test("daily video proxy rejects cross-origin writes before reaching FastAPI", as
   }), async () => { throw new Error("Unexpected upstream request"); });
   assert.equal(response.status, 403);
 });
+
+test("daily video proxy rejects hostile authority and forged same-origin headers", async () => {
+  for (const [url, headers] of [
+    ["http://untrusted.example/api/daily-video", { origin: "http://untrusted.example" }],
+    ["http://localhost/api/daily-video", { host: "untrusted.example", origin: "http://localhost" }],
+    ["http://localhost/api/daily-video", { origin: "https://untrusted.example", "sec-fetch-site": "same-origin" }],
+    ["http://localhost/api/daily-video", { "x-forwarded-for": "192.0.2.10" }],
+  ] as const) {
+    const response = await forwardDailyVideo(new Request(url, {
+      method: "POST", headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ action: "activate" }),
+    }), async () => { throw new Error("Unexpected upstream request"); });
+    assert.equal(response.status, 403);
+  }
+});
