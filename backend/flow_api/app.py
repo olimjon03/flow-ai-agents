@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, ConfigDict
 
+from .daily_video import DailyVideo, router as daily_video_router
 from .agents import AgentTask, MockProvider, OpenAIProvider, budget_limit
 from .deploy_provider import DEFAULT_BASE_URL, MODEL as DEPLOY_MODEL, DeployProvider, validate_base_url, validate_model
 from .orchestrator import DemoOrchestrator
@@ -75,14 +76,18 @@ def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
             elif image_mode != "mock":
                 raise ValueError("FLOW_STUDIO_IMAGE_PROVIDER must be mock or hive.")
             app.state.studio = Studio(ProjectStore(Path(root)), office, hive_image=image, image_cap=image_cap)
+            daily_video = app.state.daily_video = DailyVideo(app.state.studio)
+            daily_video.start()
             try:
                 yield
             finally:
+                await daily_video.close()
                 await office.close()
 
     app = FastAPI(title="Flow AI Office API", lifespan=lifespan)
 
     app.include_router(studio_router)
+    app.include_router(daily_video_router)
 
     @app.get("/health")
     async def health():

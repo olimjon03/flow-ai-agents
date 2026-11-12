@@ -232,7 +232,9 @@ export function Studio() {
     const controller = new AbortController();
     request<ProjectSummary[]>(projectsUrl, controller.signal).then((list) => {
       setProjects(list);
-      setId((selected) => selected ?? list[0]?.id ?? null);
+      const requested = new URLSearchParams(window.location.search).get("project");
+      const initial = list.find((item) => item.id === requested) ?? list[0];
+      setId((selected) => selected ?? initial?.id ?? null);
     }).catch((failure) => { if (!controller.signal.aborted) setError(failure.message); });
     return () => controller.abort();
   }, []);

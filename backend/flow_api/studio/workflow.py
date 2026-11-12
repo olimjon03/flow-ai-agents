@@ -13,7 +13,7 @@ from ..deploy_provider import attempt_cost
 from ..orchestrator import AGENTS, now
 from .hive_image_provider import IMAGE_COST, HiveImageRejected
 from .storyboard import deepseek_scenes, scene_record
-from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, publish_image, write_audio
+from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, VideoProvider, publish_image, write_audio
 
 DESKS = {
     "research": "scout", "script": "quill", "review": "guard", "storyboard": "muse",
@@ -57,7 +57,7 @@ STORYBOARD_OUTPUT_LIMIT = 1800
 
 class Studio:
     def __init__(self, store, office, ffmpeg=None, *, image: ImageProvider | None = None,
-                 hive_image: ImageProvider | None = None, image_cap=0):
+                 hive_image: ImageProvider | None = None, image_cap=0, video: VideoProvider | None = None):
         self.store = store
         self.office = office
         self.image = image if image is not None else MockImage()
@@ -65,7 +65,7 @@ class Studio:
         self.image_cap = image_cap
         self.voice = MockVoice()
         self.ffmpeg = ffmpeg or FFmpeg()
-        self.video = self.ffmpeg
+        self.video = video if video is not None else self.ffmpeg
         self.active = None
         self.worker = None
         self.replacement = None
@@ -148,16 +148,27 @@ class Studio:
             except (ValueError, OSError):
                 pass
 
-    def create(self, brief):
+    def create(self, brief, *, project_id=None, daily_profile=None):
         project = {
-            "id": uuid4().hex, "brief": brief, "createdAt": now(), "status": "draft",
+            "id": project_id or uuid4().hex, "brief": brief, "createdAt": now(), "status": "draft",
             "script": None, "review": None, "scenes": [], "assets": [], "finalAssetId": None,
             "stages": {stage: {"status": "queued", "progress": 0} for stage in DESKS},
             "activity": [], "approval": "pending", "feedback": None, "scriptApproved": False,
             "error": None,
         }
+        if daily_profile is not None:
+            project["dailyProfile"] = daily_profile
         self.save(project)
         return project
+
+    def busy(self):
+        return (self.worker is not None and not self.worker.done()
+                or self.office.run is not None and self.office.run["status"] == "running")
+
+    def launch_daily(self, project):
+        if not project.get("dailyProfile") or project["status"] != "draft":
+            raise MediaError("The daily mock project is not ready.")
+        return self.launch(project, (*PLAN, *MEDIA), daily=True)
 
     def update(self, project, stage, status, progress, message):
         project["stages"][stage] = {"status": status, "progress": progress}
@@ -174,8 +185,8 @@ class Studio:
         self.save(project)
         self.office.publish()
 
-    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset()):
-        if (self.worker and not self.worker.done()) or (self.office.run and self.office.run["status"] == "running"):
+    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset(), daily=False):
+        if self.busy():
             raise MediaError("An Office workflow is already running.")
         project.update(status="working", error=None, approval="pending", feedback=None)
         self.active = project
@@ -189,7 +200,7 @@ class Studio:
                 desk = DESKS[stage]
                 self.office.agents[desk] = replace(self.office.agents[desk], task=f"Media Studio · {stage}")
                 self.update(project, stage, "queued", 0, f"{stage.capitalize()} queued")
-        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images))
+        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images, daily=daily))
         if self.replacement:
             self.worker.add_done_callback(lambda _: self.finish_replacement(project))
         return project
@@ -326,12 +337,13 @@ class Studio:
         self.office.publish()
         return True
 
-    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images):
+    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images, *, daily=False):
         try:
             if "storyboard" in stages and not paid_storyboard:
                 await self.plan(project)
                 if project["status"] != "working":
                     return
+            if "storyboard" in stages and not paid_storyboard and not daily:
                 project["status"] = "awaiting_script_approval"
             else:
                 if paid_storyboard:

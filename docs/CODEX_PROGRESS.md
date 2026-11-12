@@ -27,3 +27,13 @@ Replacement work for a project with an existing export writes to a leased projec
 Before combined DeepSeek and Hive approval, the estimate includes the maximum configured Deploy attempts and five Hive images. Each request still reserves against the live Office budget. An uncertain Hive attempt remains visible after cancellation or restart and requires a separate acknowledgement before another paid image submission. HTTPX request logging redacts Hive CDN query strings.
 
 Run both FastAPI and the Next.js dashboard bound to loopback. Do not publish or reverse-proxy the paid Studio routes until caller authentication is available. The localhost checks are scoped to this development setup. Hive entitlement, portrait dimensions, CDN coverage, actual billing, and idempotency remain unverified.
+
+## Phase 7.3 — Daily Video Settings foundation
+
+Open **Settings → Daily Video Settings** with the local FastAPI server running. Defaults are enabled, one run per day, 06:00 and Asia/Seoul. The schedule starts inactive. Save changes, run the dry run, and explicitly activate the mock schedule. Changing settings clears activation and dry-run confirmation. Pause stops scheduled dispatch; a running job can be cancelled in Media Studio. Generate Now queues a mock job independently of scheduling, using the same local-day quota.
+
+The single FastAPI worker stores settings and job admissions in the Studio SQLite database. Manual submissions carry an idempotency key. Scheduled admissions are serialized with manual admissions and fill available slots after the configured local time. Queued jobs resume after restart within their admission day and expire at the next local day. An interrupted export is recorded as failed and consumes its slot. The service does not backfill missed dates. A timezone change applies the new local-day window to recorded UTC admission times.
+
+Four isolated mock profile descriptors rotate across admitted jobs. Their paths are configuration labels. The scheduler does not create or open Chrome profiles, sign into accounts, request Google Flow, or use paid providers. Daily runs produce local mock previews and keep final approval pending. The existing manual Studio script review stays in place. No publishing integration is connected.
+
+Manual MP4 import is a separate design. Accept a bounded local upload for a selected scene, verify the container and video stream with FFmpeg, normalize the clip to the scene duration and project aspect, then publish it as a project-scoped video asset. Reuse the existing staged replacement workflow so importing a clip generates a new export pending explicit approval. The current video provider remains injectable, with the existing FFmpeg still-image clip implementation as the default.
