@@ -58,3 +58,21 @@ test("SSE only accepts complete server snapshots with valid progress and referen
     ...event, activity: [{ ...event.activity[0], agentId: "missing" }],
   })), null);
 });
+
+test("SSE recognizes a Deploy run as live model execution and a Deploy server demo as simulated", () => {
+  const event = {
+    ...demoSnapshot,
+    confirmedAt: "2026-11-12T11:00:00Z",
+    providerMode: "deploy",
+    simulation: false,
+    run: { id: "run", status: "completed", mode: "deploy", script: "Script", review: "Review" },
+  };
+  const confirmed = parseOfficeEvent(JSON.stringify(event));
+  assert.equal(confirmed?.providerMode, "deploy");
+  assert.equal(confirmed?.run?.mode, "deploy");
+  assert.equal(confirmed?.simulation, false);
+  assert.equal(parseOfficeEvent(JSON.stringify({ ...event, simulation: true })), null);
+  const demo = parseOfficeEvent(JSON.stringify({ ...event, simulation: true, run: { id: "demo", status: "running" } }));
+  assert.equal(demo?.providerMode, "deploy");
+  assert.equal(demo?.simulation, true);
+});

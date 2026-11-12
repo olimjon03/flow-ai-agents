@@ -10,6 +10,7 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, ConfigDict
 
 from .agents import AgentTask, MockProvider, OpenAIProvider, budget_limit
+from .deploy_provider import DEFAULT_BASE_URL, MODEL as DEPLOY_MODEL, DeployProvider, validate_base_url, validate_model
 from .orchestrator import DemoOrchestrator
 from .studio.routes import router as studio_router
 from .studio.store import ProjectStore
@@ -25,7 +26,6 @@ def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
     async def lifespan(app: FastAPI):
         async with AsyncExitStack() as stack:
             selected = provider
-            cap = budget_limit(os.getenv("FLOW_OFFICE_MAX_COST_USD", "0.05"))
             if selected is None:
                 mode = os.getenv("FLOW_OFFICE_PROVIDER", "mock")
                 if mode == "mock":
@@ -39,8 +39,22 @@ def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
                         trust_env=False, timeout=None,
                     ))
                     selected = OpenAIProvider(client)
+                elif mode == "deploy":
+                    key = os.getenv("DEPLOY_API_KEY", "").strip()
+                    if not key or not key.isascii() or any(not (33 <= ord(char) <= 126) for char in key):
+                        raise ValueError("Deploy office mode requires a valid DEPLOY_API_KEY Secret Key.")
+                    base_url = validate_base_url(os.getenv("DEPLOY_BASE_URL", DEFAULT_BASE_URL).strip())
+                    model = validate_model(os.getenv("DEPLOY_MODEL", DEPLOY_MODEL).strip())
+                    client = await stack.enter_async_context(httpx.AsyncClient(
+                        base_url=base_url, headers={"Authorization": f"Bearer {key}"},
+                        trust_env=False, follow_redirects=False, timeout=None,
+                    ))
+                    selected = DeployProvider(client, model)
                 else:
-                    raise ValueError("FLOW_OFFICE_PROVIDER must be mock or openai.")
+                    raise ValueError("FLOW_OFFICE_PROVIDER must be mock, openai or deploy.")
+
+            default_cap = "0.01" if selected.mode == "deploy" else "0.05"
+            cap = budget_limit(os.getenv("FLOW_OFFICE_MAX_COST_USD", default_cap))
 
             office = DemoOrchestrator(tick_seconds, selected, cap)
             app.state.office = office
@@ -63,7 +77,10 @@ def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
     async def start_task(request: Request, body: AgentTask | StartDemo):
         office = request.app.state.office
         if isinstance(body, AgentTask):
-            if body.allowPaid != (office.provider.mode == "openai"):
+            mode = office.provider.mode
+            if (body.allowPaid != (mode != "mock")
+                or (body.provider is not None and body.provider != mode)
+                or (mode == "deploy" and body.provider != "deploy")):
                 raise HTTPException(409, "Provider mode changed or paid execution was not confirmed.")
             run_id = office.start_agents(body)
         else:

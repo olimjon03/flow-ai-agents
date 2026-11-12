@@ -43,7 +43,11 @@ type OfficeData = {
   usagePeriod: string;
 };
 
-export type ProviderMode = "mock" | "openai";
+export const providerNames = { mock: "Mock", openai: "OpenAI", deploy: "Deploy DeepSeek" } as const;
+export type ProviderMode = keyof typeof providerNames;
+export function isProviderMode(value: unknown): value is ProviderMode {
+  return typeof value === "string" && Object.hasOwn(providerNames, value);
+}
 
 export type OfficeRun = {
   id: string;

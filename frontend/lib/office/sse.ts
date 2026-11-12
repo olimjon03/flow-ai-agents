@@ -1,5 +1,5 @@
 import { parseHandoff } from "./handoff.ts";
-import { workflow } from "./model.ts";
+import { isProviderMode, workflow } from "./model.ts";
 import type { Agent, AgentStatus, Activity, OfficeRun, OfficeSnapshot, OfficeSource, Usage } from "./model.ts";
 
 const statuses = new Set<AgentStatus>(["idle", "queued", "working", "completed", "failed", "cancelled"]);
@@ -46,7 +46,7 @@ function isActivity(value: unknown): value is Activity {
 function isRun(value: unknown): value is OfficeRun {
   return isObject(value) && typeof value.id === "string" && !!value.id
     && (value.status === "running" || value.status === "completed" || value.status === "failed" || value.status === "cancelled")
-    && (value.mode === undefined || value.mode === "mock" || value.mode === "openai")
+    && (value.mode === undefined || isProviderMode(value.mode))
     && [value.script, value.review, value.error].every((field) =>
       field === undefined || field === null || typeof field === "string");
 }
@@ -66,8 +66,8 @@ export function parseOfficeEvent(data: string): ConfirmedSnapshot | null {
     || !Array.isArray(value.activity) || !value.activity.every(isActivity)) return null;
 
   const providerMode = value.providerMode ?? "mock";
-  if (providerMode !== "mock" && providerMode !== "openai") return null;
-  if (value.simulation !== (value.run?.mode !== "openai")) return null;
+  if (!isProviderMode(providerMode)) return null;
+  if (value.simulation !== (!value.run?.mode || value.run.mode === "mock")) return null;
 
   const agentIds = new Set(value.agents.map(({ id }) => id));
   if (agentIds.size !== value.agents.length
