@@ -221,3 +221,5 @@ The Studio storage panel shows archived export count, tracked archive bytes, and
 ### Google Flow manual feasibility
 
 The localhost guide is disabled by default. Set `FLOW_GOOGLE_FLOW_MANUAL=1` when starting the backend to use it with a six-second scene in a finished vertical project. Follow the [policy findings, setup and acceptance checklist](docs/GOOGLE_FLOW_FEASIBILITY.md). The official Gemini adapter is preflight-only.
+
+The [Phase 7.6A terminal experiment](docs/GOOGLE_FLOW_BROWSER_POC.md) adds opt-in Chrome launch, a local download watcher and explicit scene import.
