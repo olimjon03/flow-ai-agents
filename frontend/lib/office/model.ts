@@ -52,7 +52,7 @@ export function isProviderMode(value: unknown): value is ProviderMode {
 export type OfficeRun = {
   id: string;
   status: "running" | "completed" | "failed" | "cancelled";
-  mode?: ProviderMode;
+  mode?: ProviderMode | "studio";
   script?: string | null;
   review?: string | null;
   error?: string | null;

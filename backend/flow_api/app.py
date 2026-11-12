@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from .agents import AgentTask, MockProvider, OpenAIProvider, budget_limit
 from .deploy_provider import DEFAULT_BASE_URL, MODEL as DEPLOY_MODEL, DeployProvider, validate_base_url, validate_model
 from .orchestrator import DemoOrchestrator
+from .studio.hive_image_provider import HiveImageProvider
 from .studio.routes import router as studio_router
 from .studio.store import ProjectStore
 from .studio.workflow import Studio
@@ -59,7 +60,21 @@ def create_app(tick_seconds: float = 0.55, provider=None, media_root=None):
             office = DemoOrchestrator(tick_seconds, selected, cap)
             app.state.office = office
             root = media_root or os.getenv("FLOW_MEDIA_ROOT") or Path(__file__).resolve().parents[2] / ".flow-media"
-            app.state.studio = Studio(ProjectStore(Path(root)), office)
+            image = None
+            image_cap = 0
+            image_mode = os.getenv("FLOW_STUDIO_IMAGE_PROVIDER", "mock")
+            if image_mode == "hive":
+                key = os.getenv("HIVE_API_KEY", "").strip()
+                if not key or any(not (33 <= ord(char) <= 126) for char in key):
+                    raise ValueError("Hive image mode requires a valid HIVE_API_KEY.")
+                image_cap = budget_limit(os.getenv("FLOW_STUDIO_IMAGE_MAX_COST_USD", "0.03"))
+                image_client = await stack.enter_async_context(httpx.AsyncClient(
+                    trust_env=False, follow_redirects=False, timeout=None,
+                ))
+                image = HiveImageProvider(image_client, key)
+            elif image_mode != "mock":
+                raise ValueError("FLOW_STUDIO_IMAGE_PROVIDER must be mock or hive.")
+            app.state.studio = Studio(ProjectStore(Path(root)), office, hive_image=image, image_cap=image_cap)
             try:
                 yield
             finally:

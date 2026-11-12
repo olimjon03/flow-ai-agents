@@ -46,7 +46,7 @@ function isActivity(value: unknown): value is Activity {
 function isRun(value: unknown): value is OfficeRun {
   return isObject(value) && typeof value.id === "string" && !!value.id
     && (value.status === "running" || value.status === "completed" || value.status === "failed" || value.status === "cancelled")
-    && (value.mode === undefined || isProviderMode(value.mode))
+    && (value.mode === undefined || value.mode === "studio" || isProviderMode(value.mode))
     && [value.script, value.review, value.error].every((field) =>
       field === undefined || field === null || typeof field === "string");
 }

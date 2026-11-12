@@ -5,8 +5,9 @@ import re
 from dataclasses import replace
 from uuid import uuid4
 
-from ..agents import AgentError, AgentTask, Budget, MockProvider, STEPS
+from ..agents import AgentError, AgentTask, Budget, MockProvider, NANODOLLARS, STEPS
 from ..orchestrator import AGENTS, now
+from .hive_image_provider import IMAGE_COST
 from .storyboard import deepseek_scenes, scene_record
 from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, publish_image, write_audio
 
@@ -38,10 +39,13 @@ def mock_script_cues(script, timestamps):
 
 
 class Studio:
-    def __init__(self, store, office, ffmpeg=None, *, image: ImageProvider | None = None):
+    def __init__(self, store, office, ffmpeg=None, *, image: ImageProvider | None = None,
+                 hive_image: ImageProvider | None = None, image_cap=0):
         self.store = store
         self.office = office
         self.image = image if image is not None else MockImage()
+        self.hive_image = hive_image
+        self.image_cap = image_cap
         self.voice = MockVoice()
         self.ffmpeg = ffmpeg or FFmpeg()
         self.video = self.ffmpeg
@@ -84,12 +88,13 @@ class Studio:
         self.save(project)
         self.office.publish()
 
-    def launch(self, project, stages, *, paid_storyboard=False):
+    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset()):
         if (self.worker and not self.worker.done()) or (self.office.run and self.office.run["status"] == "running"):
             raise MediaError("An Office workflow is already running.")
         project.update(status="working", error=None, approval="pending", feedback=None)
         self.active = project
-        self.office.run = {"id": uuid4().hex, "status": "running", "mode": "deploy" if paid_storyboard else "mock"}
+        mode = "studio" if paid_images else "deploy" if paid_storyboard else "mock"
+        self.office.run = {"id": uuid4().hex, "status": "running", "mode": mode}
         self.office.agents = {agent.id: agent for agent in AGENTS}
         self.office.activity.clear()
         self.office.budget = Budget(self.office.max_cost)
@@ -98,12 +103,15 @@ class Studio:
                 desk = DESKS[stage]
                 self.office.agents[desk] = replace(self.office.agents[desk], task=f"Media Studio · {stage}")
                 self.update(project, stage, "queued", 0, f"{stage.capitalize()} queued")
-        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard))
+        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images))
         return project
 
-    def reset(self, project, stages):
-        removed = [asset for asset in project["assets"] if asset["stage"] in stages]
-        project["assets"] = [asset for asset in project["assets"] if asset["stage"] not in stages]
+    def reset(self, project, stages, keep_images=frozenset()):
+        removed = [asset for asset in project["assets"] if asset["stage"] in stages
+                   and not (asset["stage"] == "image" and asset.get("provider") == "hive"
+                            and asset["sceneId"] in keep_images)]
+        removed_ids = {asset["id"] for asset in removed}
+        project["assets"] = [asset for asset in project["assets"] if asset["id"] not in removed_ids]
         if "editor" in stages:
             project["finalAssetId"] = None
         if "storyboard" in stages:
@@ -112,9 +120,9 @@ class Studio:
             project["stages"][stage] = {"status": "queued", "progress": 0}
         return removed
 
-    def regenerate(self, project, reset_stages, run_stages):
-        removed = self.reset(project, reset_stages)
-        self.launch(project, run_stages)
+    def regenerate(self, project, reset_stages, run_stages, *, paid_images=False, keep_images=frozenset()):
+        removed = self.reset(project, reset_stages, keep_images)
+        self.launch(project, run_stages, paid_images=paid_images, keep_images=keep_images)
         for asset in removed:
             try:
                 self.store.path(project["id"], asset["id"], asset["extension"]).unlink(missing_ok=True)
@@ -122,7 +130,31 @@ class Studio:
                 pass
         return project
 
-    def action(self, project, action, stage, feedback, allow_paid=False):
+    def image_quote(self, project, count=None):
+        if self.hive_image is None or project["brief"]["aspect"] != "9:16":
+            return None
+        return {
+            "estimatedCostUsd": (len(project["scenes"]) if count is None else count) * IMAGE_COST / NANODOLLARS,
+            "unitCostUsd": IMAGE_COST / NANODOLLARS,
+            "maxCostUsd": min(self.image_cap, self.office.max_cost) / NANODOLLARS,
+        }
+
+    def check_paid_images(self, project, count):
+        quote = self.image_quote(project, count)
+        if quote is None:
+            raise MediaError("Paid images require Hive mode and a vertical project.")
+        if count * IMAGE_COST > min(self.image_cap, self.office.max_cost):
+            raise MediaError("The estimated image cost exceeds the run budget.")
+
+    def reusable_images(self, project):
+        scene_ids = {scene["id"] for scene in project["scenes"]}
+        return frozenset(
+            asset["sceneId"] for asset in project["assets"]
+            if asset["stage"] == "image" and asset.get("provider") == "hive"
+            and asset["sceneId"] in scene_ids and self.store.asset(project, asset["id"])
+        )
+
+    def action(self, project, action, stage, feedback, allow_paid=False, allow_paid_images=False):
         if action == "cancel":
             if not self.cancel(project["id"]):
                 raise MediaError("This project has no active job.")
@@ -134,12 +166,14 @@ class Studio:
         can_approve = (project["status"] in {"awaiting_script_approval", "failed", "cancelled"}
                        and project["script"] and project["scenes"] and not project["scriptApproved"])
         if action == "approve-script" and can_approve:
+            if allow_paid_images:
+                self.check_paid_images(project, 5 if allow_paid else len(project["scenes"]))
             if allow_paid:
                 if self.office.provider.mode != "deploy" or project["brief"]["durationSeconds"] != 30:
                     raise MediaError("Deploy storyboard generation requires Deploy mode and a 30-second project.")
-                return self.launch(project, ("storyboard", *MEDIA), paid_storyboard=True)
+                return self.launch(project, ("storyboard", *MEDIA), paid_storyboard=True, paid_images=allow_paid_images)
             project["scriptApproved"] = True
-            self.launch(project, MEDIA)
+            self.launch(project, MEDIA, paid_images=allow_paid_images)
             if project["stages"]["storyboard"]["status"] != "completed":
                 self.update(project, "storyboard", "completed", 100, "Using the approved mock storyboard")
             return project
@@ -155,7 +189,12 @@ class Studio:
             for prerequisite in ("image", "voice", "video"):
                 if project["stages"][prerequisite]["status"] != "completed":
                     required.update(DEPENDENTS[prerequisite])
-            return self.regenerate(project, required, required)
+            keep_images = frozenset()
+            if allow_paid_images:
+                if project["status"] in {"failed", "cancelled"} and project["stages"]["image"]["status"] != "completed":
+                    keep_images = self.reusable_images(project)
+                self.check_paid_images(project, len(project["scenes"]) - len(keep_images))
+            return self.regenerate(project, required, required, paid_images=allow_paid_images, keep_images=keep_images)
         if action in {"approve", "reject"} and project["status"] in {"awaiting_approval", "approved", "rejected"}:
             if not project["finalAssetId"] or not self.store.asset(project, project["finalAssetId"]):
                 raise MediaError("The final MP4 is missing. Regenerate the export.")
@@ -185,7 +224,7 @@ class Studio:
         self.office.publish()
         return True
 
-    async def execute(self, project, stages, paid_storyboard):
+    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images):
         try:
             if "storyboard" in stages and not paid_storyboard:
                 await self.plan(project)
@@ -195,7 +234,12 @@ class Studio:
                     await self.run_stage(project, "storyboard", self.deploy_storyboard)
                 async def visuals():
                     if "image" in stages:
-                        await self.run_stage(project, "image", self.images)
+                        if paid_images:
+                            async def paid_visuals(current):
+                                await self.images(current, paid=True, keep_images=keep_images)
+                            await self.run_stage(project, "image", paid_visuals)
+                        else:
+                            await self.run_stage(project, "image", self.images)
                     if "video" in stages:
                         await self.run_stage(project, "video", self.clips)
 
@@ -319,12 +363,24 @@ class Studio:
                     return result[0]
         raise MediaError(f"Required {stage} media is missing. Regenerate that stage.")
 
-    async def images(self, project):
+    async def images(self, project, *, paid=False, keep_images=frozenset()):
         width, height = self.resolution(project)
+        provider = self.hive_image if paid else self.image
+        if paid:
+            self.check_paid_images(project, len(project["scenes"]) - len(keep_images))
+            if self.office.budget.spent + (len(project["scenes"]) - len(keep_images)) * IMAGE_COST > self.office.budget.limit:
+                raise MediaError("The estimated image cost exceeds the remaining run budget.")
         for scene in project["scenes"]:
+            if scene["id"] in keep_images:
+                continue
+            if paid:
+                self.office.budget.reserve_amount(DESKS["image"], IMAGE_COST)
+                project["imageAttempts"] = project.get("imageAttempts", 0) + 1
+                self.save(project)
+                self.office.publish()
             request = ImageRequest(scene["prompt"], scene["index"], width, height)
             await self.generate_asset(project, "image", ".png", "Scene image",
-                                      lambda path: publish_image(self.image, request, path), scene["id"])
+                                      lambda path: publish_image(provider, request, path), scene["id"])
             self.update(project, "image", "working", (scene["index"] + 1) * 90 // len(project["scenes"]), "Scene image ready")
 
     async def narration(self, project):

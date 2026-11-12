@@ -11,6 +11,7 @@ import type { Activity, Agent, AgentStatus, OfficeSnapshot } from "../../lib/off
 
 import { createSseOfficeSource } from "../../lib/office/sse";
 
+const runProviderNames = { ...providerNames, studio: "Media Studio" };
 const noHandoffs: readonly TaskHandoff[] = [];
 const officeSource = createSseOfficeSource("/api/office/events", demoSnapshot);
 const stageIcons = { research: Search, create: Sparkles, review: CheckCircle2, deliver: Send };
@@ -97,7 +98,7 @@ function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
       <dl className="office-usage">
         <div><dt>Requests</dt><dd>{number.format(usage.requests)}</dd></div>
         <div><dt>Tokens</dt><dd>{number.format(usage.inputTokens + usage.outputTokens)}</dd></div>
-        <div><dt>{provider ? `Estimated ${providerNames[provider]} cost` : "Demo estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
+        <div><dt>{provider ? `Estimated ${runProviderNames[provider]} cost` : "Demo estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
       </dl>
       <p className="office-muted office-usage-note">
         {snapshot.source === "demo"
@@ -129,7 +130,7 @@ export function Office() {
   const running = run?.status === "running";
   const provider = offline ? "mock" : snapshot.providerMode;
   const simulated = offline || snapshot.simulation;
-  const runProvider = run?.mode ? providerNames[run.mode] : "Demo";
+  const runProvider = run?.mode ? runProviderNames[run.mode] : "Demo";
   const runLabel = `${runProvider} workflow`;
 
   async function changeRun(input?: AgentTaskInput, cancelId?: string) {

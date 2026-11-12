@@ -74,7 +74,14 @@ class Budget:
 
     def reserve(self, agent_id: str, input_bound: int, output_limit: int, rates=(INPUT_RATE, OUTPUT_RATE)):
         amount = input_bound * rates[0] + output_limit * rates[1]
-        if sum(usage.cost for usage in self.agents.values()) + amount > self.limit:
+        return self.reserve_amount(agent_id, amount)
+
+    @property
+    def spent(self):
+        return sum(usage.cost for usage in self.agents.values())
+
+    def reserve_amount(self, agent_id: str, amount: int):
+        if self.spent + amount > self.limit:
             raise AgentError("The run reached its estimated cost limit before another request could start.")
         usage = self.agents.setdefault(agent_id, AgentUsage())
         usage.requests += 1

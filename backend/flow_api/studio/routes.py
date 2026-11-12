@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, ValidationError, model_validator
 
+from ..agents import NANODOLLARS
+from .hive_image_provider import IMAGE_COST
 from .media import MediaError
 from .store import MEDIA_TYPES
 
@@ -29,6 +31,7 @@ class Action(BaseModel):
     action: Literal["start", "approve-script", "approve", "reject", "regenerate", "cancel"]
     stage: Literal["script", "image", "voice", "video", "editor"] | None = None
     allowPaid: StrictBool = False
+    allowPaidImages: StrictBool = False
     feedback: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)] | None = None
 
     @model_validator(mode="after")
@@ -39,6 +42,9 @@ class Action(BaseModel):
             raise ValueError("Rejection requires feedback.")
         if self.allowPaid and self.action != "approve-script":
             raise ValueError("Paid consent is only available when approving a script.")
+        if self.allowPaidImages and not (self.action == "approve-script"
+                                         or self.action == "regenerate" and self.stage == "image"):
+            raise ValueError("Paid image consent is only available when approving a script or regenerating images.")
         return self
 
 
@@ -59,9 +65,13 @@ async def read_model(request, model):
 
 
 def project_response(request, project):
-    return {**project, "deployStoryboardAvailable": (
-        request.app.state.studio.office.provider.mode == "deploy" and project["brief"]["durationSeconds"] == 30
-    )}
+    studio = request.app.state.studio
+    return {
+        **project,
+        "deployStoryboardAvailable": studio.office.provider.mode == "deploy" and project["brief"]["durationSeconds"] == 30,
+        "imageQuote": studio.image_quote(project),
+        "estimatedImageSpendUsd": project.get("imageAttempts", 0) * IMAGE_COST / NANODOLLARS,
+    }
 
 
 def project_for(request, project_id):
@@ -93,7 +103,7 @@ async def action(request: Request, project_id: str):
     data = await read_model(request, Action)
     try:
         updated = request.app.state.studio.action(
-            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid,
+            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages,
         )
         return project_response(request, updated)
     except MediaError as error:
