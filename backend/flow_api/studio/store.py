@@ -28,6 +28,11 @@ class ProjectStore:
         self.db = self.root / "projects.sqlite3"
         with closing(self.connect()) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, created TEXT, data TEXT)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS clip_imports (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+                "scene_id TEXT NOT NULL, target_asset_id TEXT, source_sha256 TEXT NOT NULL, "
+                "status TEXT NOT NULL, result_asset_id TEXT, error TEXT)"
+            )
 
     @contextmanager
     def upload_slot(self):
@@ -94,7 +99,7 @@ class ProjectStore:
             )
             return cursor.rowcount == 1
 
-    def claim_replacement(self, project, job_id):
+    def claim_replacement(self, project, job_id, clip_import=None):
         with closing(self.connect()) as db, db:
             cursor = db.execute(
                 "UPDATE projects SET data=? WHERE id=? AND json_extract(data, '$.replacementJob') IS NULL "
@@ -105,7 +110,13 @@ class ProjectStore:
             if cursor.rowcount != 1:
                 raise RuntimeError("The project already has an active job.")
 
-    def save_replacement(self, project, job_id):
+            if clip_import is not None:
+                db.execute(
+                    "INSERT INTO clip_imports VALUES (?, ?, ?, ?, ?, 'working', NULL, NULL)",
+                    (job_id, project["id"], *clip_import),
+                )
+
+    def save_replacement(self, project, job_id, *, import_status=None, result_asset_id=None):
         with closing(self.connect()) as db, db:
             cursor = db.execute(
                 "UPDATE projects SET data=? WHERE id=? AND json_extract(data, '$.replacementJob')=?",
@@ -113,6 +124,29 @@ class ProjectStore:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("The replacement job is no longer current.")
+
+            if import_status is not None:
+                db.execute(
+                    "UPDATE clip_imports SET status=?, result_asset_id=?, error=? "
+                    "WHERE id=? AND project_id=? AND status='working'",
+                    (import_status, result_asset_id, project["error"], job_id, project["id"]),
+                )
+
+    def clip_import(self, project_id, operation_id):
+        if not ID.fullmatch(project_id) or not ID.fullmatch(operation_id):
+            return None
+        # A single SQLite statement observes the operation and scene references at the same revision.
+        with closing(self.connect()) as db:
+            row = db.execute(
+                "SELECT i.scene_id, i.target_asset_id, i.status, i.result_asset_id, i.error, p.data "
+                "FROM clip_imports i JOIN projects p ON p.id=i.project_id WHERE i.id=? AND i.project_id=?",
+                (operation_id, project_id),
+            ).fetchone()
+        if row is None:
+            return None
+        scene_id, target, status, result, error, data = row
+        return ({"id": operation_id, "projectId": project_id, "sceneId": scene_id, "targetAssetId": target,
+                 "status": status, "resultAssetId": result, "error": error}, json.loads(data))
 
     def batch_directory(self, project_id, batch):
         if not ID.fullmatch(batch):

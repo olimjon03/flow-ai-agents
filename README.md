@@ -203,11 +203,11 @@ cd frontend
 npm run dev
 ```
 
-In Media Studio, create a 30-second 9:16 project with **Uzbek** as the language. Start the mock workflow and approve the script to create a baseline export. Select one H.264 or HEVC MP4 per scene, ideally six seconds and up to 32 MiB each, then click **Import selected clips in scene order**. A single scene also has its own Import button. The queue waits for each replacement export to finish before uploading the next scene. The first failure stops the queue and leaves earlier successful scenes saved.
+In Media Studio, create a 30-second 9:16 project with **Uzbek** as the language. Start the mock workflow and approve the script to create a baseline export. Select one H.264 or HEVC MP4 per scene, ideally six seconds and up to 32 MiB each, then click **Import selected clips in scene order**. A single scene also has its own Import button. The queue advances only when the server reports success for that exact import operation and its clip is still active in the requested scene. The first failure stops the queue and keeps the selected files for retry. Replacements require confirmation for the selected file and the current scene clip.
 
-The five 6-second scenes keep their storyboard order. A shorter clip holds its last frame and a longer one is trimmed. The dashboard shows the original and target durations, the sanitized filename, and whether the final export uses imported clips, mock placeholders, or both. Studio keeps its existing audio track and Uzbek subtitles. The current voiceover provider produces a mock tone.
+The five 6-second scenes keep their storyboard order. A shorter clip holds its last frame and a longer one is trimmed. The dashboard shows the original and target durations, the sanitized filename, and whether the final export uses imported clips, mock placeholders, or both. Studio keeps its existing audio track and Uzbek subtitles. The current voiceover provider produces a mock tone. Older caption tracks may have unverified language and are labeled accordingly.
 
-The Studio storage panel shows archived export count, tracked archive bytes, and free disk space. The safety floor defaults to 1024 MiB and is configurable with `FLOW_STUDIO_MIN_FREE_MIB`. Below the floor, new renders pause. Upload admission also reserves room for the incoming file. Approved and archived exports are retained.
+The Studio storage panel shows archived export count, tracked archive bytes, and free disk space. The safety floor defaults to 1024 MiB and is configurable with `FLOW_STUDIO_MIN_FREE_MIB`. Below the floor, new renders pause. The floor and incoming-file allowance are checked at admission and stage boundaries. Other processes can consume free space while FFmpeg is running. Approved and archived exports are retained.
 
 #### Manual acceptance checklist
 

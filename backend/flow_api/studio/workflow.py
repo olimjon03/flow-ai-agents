@@ -49,10 +49,11 @@ class Replacement:
     previous: dict
     id: str
     lease: BinaryIO
+    import_scene_id: str | None = None
 
 
 ACTIVE_MEDIA = ("assets", "finalAssetId", "approval", "feedback", "approvedAssetId", "lastApprovedAssetId")
-ACTIVE_PLAN = ("script", "review", "scenes", "scriptApproved")
+ACTIVE_PLAN = ("script", "review", "scenes", "scriptApproved", "captionLanguage")
 STORYBOARD_OUTPUT_LIMIT = 1800
 
 
@@ -85,7 +86,7 @@ class Studio:
                     self.cancel_stages(project)
                 job_id = project.pop("replacementJob", None)
                 if job_id:
-                    store.save_replacement(project, job_id)
+                    store.save_replacement(project, job_id, import_status="failed")
                 else:
                     self.save(project)
 
@@ -99,26 +100,28 @@ class Studio:
         else:
             self.store.save(project)
 
-    def begin_replacement(self, project):
+    def begin_replacement(self, project, clip_import=None):
         if (self.worker and not self.worker.done()) or (self.office.run and self.office.run["status"] == "running"):
             raise MediaError("An Office workflow is already running.")
         job_id = uuid4().hex
         lease = self.store.stage(project["id"], job_id)
         try:
-            self.store.claim_replacement(project, job_id)
+            self.store.claim_replacement(project, job_id, clip_import)
         except BaseException as error:
             lease.close()
             shutil.rmtree(self.store.batch_directory(project["id"], job_id), ignore_errors=True)
             if isinstance(error, RuntimeError):
                 raise MediaError(str(error)) from None
             raise
-        self.replacement = Replacement(project, deepcopy(project), job_id, lease)
+        self.replacement = Replacement(project, deepcopy(project), job_id, lease, clip_import[0] if clip_import else None)
+        return job_id
 
     def finish_replacement(self, project):
         job = self.replacement
         if not job or job.project is not project:
             return
         committed = False
+        imported = None
         try:
             success = project["status"] == "awaiting_approval" and self.active is project
             if success:
@@ -127,13 +130,25 @@ class Studio:
                     project.update(status="failed", error="The replacement export is missing.")
                     self.office.run.update(status="failed", error=project["error"])
                     success = False
+            if success and job.import_scene_id:
+                imported = next((asset["id"] for asset in project["assets"]
+                                 if asset.get("batch") == job.id and asset.get("provider") == "manual"
+                                 and asset["sceneId"] == job.import_scene_id), None)
+                if not imported or not self.store.asset(project, imported):
+                    project.update(status="failed", error="The imported scene clip is missing.")
+                    self.office.run.update(status="failed", error=project["error"])
+                    success = False
             if not success:
                 if project["status"] == "working":
                     project.update(status="cancelled", error="Replacement cancelled.")
                 fields = ACTIVE_MEDIA if project["status"] == "awaiting_script_approval" else (*ACTIVE_MEDIA, *ACTIVE_PLAN, "stages")
                 project.update({key: job.previous.get(key) for key in fields})
             project.pop("replacementJob", None)
-            self.store.save_replacement(project, job.id)
+            import_status = None
+            if job.import_scene_id:
+                import_status = "succeeded" if success else "cancelled" if project["status"] == "cancelled" else "failed"
+            self.store.save_replacement(project, job.id, import_status=import_status,
+                                        result_asset_id=imported if success else None)
             committed = success
             if committed:
                 active_ids = {asset["id"] for asset in project["assets"]}
@@ -228,7 +243,7 @@ class Studio:
         if "editor" in stages:
             project["finalAssetId"] = None
         if "storyboard" in stages:
-            project.update(scriptApproved=False, script=None, review=None, scenes=[])
+            project.update(scriptApproved=False, script=None, review=None, scenes=[], captionLanguage=None)
         for stage in stages:
             project["stages"][stage] = {"status": "queued", "progress": 0}
         return removed
@@ -274,10 +289,13 @@ class Studio:
         )
 
     def action(self, project, action, stage, feedback, allow_paid=False, allow_paid_images=False,
-               acknowledge_uncertain=False, *, reviewed_asset_id=None, confirm_discard=False):
+               acknowledge_uncertain=False, *, reviewed_asset_id=None, confirm_discard=False, cancel_import_id=None):
         if allow_paid_images and project.get("hiveUncertain") and not acknowledge_uncertain:
             raise MediaError("A previous Hive attempt may have been billed. Acknowledge it before resubmitting.")
         if action == "cancel":
+            job = self.replacement
+            if cancel_import_id and (not job or job.id != cancel_import_id or not job.import_scene_id):
+                raise MediaError("This import is no longer running. Refresh the project.")
             if not self.cancel(project["id"]):
                 raise MediaError("This project has no active job.")
             return self.store.get(project["id"])
@@ -474,6 +492,9 @@ class Studio:
                     current[stage] = result
             await self.run_stage(project, stage, generate)
         await self.run_stage(project, "storyboard", self.storyboard)
+        project["captionLanguage"] = (
+            "Uzbek" if brief["durationSeconds"] == 30 and brief["language"].strip().casefold() == "uzbek" else None
+        )
 
     async def storyboard(self, project):
         duration = project["brief"]["durationSeconds"]
@@ -517,6 +538,7 @@ class Studio:
             lambda message: self.update(project, "storyboard", "working", 1, f"{message} Retrying."),
         )
         project["scenes"] = deepseek_scenes(result)
+        project["captionLanguage"] = None
         project["scriptApproved"] = True
 
     async def generate_asset(self, project, stage, extension, label, operation, scene_id=None, **metadata):
@@ -593,7 +615,7 @@ class Studio:
                 f"{scene['narration']}\n" for index, scene in enumerate(project["scenes"])
             ), encoding="utf-8")
 
-        await self.generate_asset(project, "voice", ".srt", "Timed subtitle segments", subtitles)
+        await self.generate_asset(project, "voice", ".srt", "Timed subtitle segments", subtitles, language=project.get("captionLanguage"))
 
         async def browser_subtitles(path):
             cues = []
@@ -604,13 +626,13 @@ class Studio:
                 cues.append(f"{start} --> {end}\n{narration}")
             path.write_text("WEBVTT\n\n" + "\n\n".join(cues) + "\n", encoding="utf-8")
 
-        await self.generate_asset(project, "voice", ".vtt", "Browser subtitle track", browser_subtitles)
+        await self.generate_asset(project, "voice", ".vtt", "Browser subtitle track", browser_subtitles, language=project.get("captionLanguage"))
 
     def resolution(self, project):
         width, height = (360, 640) if project["brief"]["resolution"] == "test" else (1080, 1920)
         return (width, height) if project["brief"]["aspect"] == "9:16" else (height, width)
 
-    def check_clip_import(self, project, scene_id, expected_export, confirmed):
+    def check_clip_import(self, project, scene_id, expected_export, replace_asset):
         if self.busy() or project["status"] == "working":
             raise MediaError("Wait for the active workflow before importing a clip.")
         if (project["brief"]["aspect"] != "9:16" or not expected_export
@@ -619,19 +641,22 @@ class Studio:
         scene = next((item for item in project["scenes"] if item["id"] == scene_id), None)
         if not scene:
             raise MediaError("The scene is no longer part of this export.")
-        self.require_manual_discard_confirmation(project, confirmed, scene_id)
-        return scene
+        target = next((asset for asset in project["assets"] if asset["stage"] == "video" and asset["sceneId"] == scene_id), None)
+        manual_id = target["id"] if target and target.get("provider") == "manual" else None
+        if manual_id != replace_asset:
+            raise MediaError("Confirm replacement of the current imported clip for this scene and retry.")
+        return scene, target["id"] if target else None
 
-    def launch_clip_import(self, project, scene_id, expected_export, upload, confirmed=False, filename=None):
-        scene = self.check_clip_import(project, scene_id, expected_export, confirmed)
+    def launch_clip_import(self, project, scene_id, expected_export, upload, replace_asset, source_sha256, filename):
+        scene, target = self.check_clip_import(project, scene_id, expected_export, replace_asset)
         self.require_render_space()
         for item in project["scenes"]:
             if item["id"] != scene_id:
                 self.require_asset(project, ".mp4", "video", item["id"])
         self.require_asset(project, ".wav", "voice")
         self.require_asset(project, ".srt", "voice")
-        self.begin_replacement(project)
-        source = self.store.batch_directory(project["id"], self.replacement.id) / "input.mp4"
+        operation_id = self.begin_replacement(project, (scene_id, target, source_sha256))
+        source = self.store.batch_directory(project["id"], operation_id) / "input.mp4"
         try:
             upload.replace(source)
         except OSError:
@@ -641,7 +666,8 @@ class Studio:
         self.reset(project, ("editor",))
         project["assets"] = [asset for asset in project["assets"]
                              if not (asset["stage"] == "video" and asset["sceneId"] == scene_id)]
-        return self.launch(project, ("video", "editor"), clip_import=(scene, source, filename))
+        self.launch(project, ("video", "editor"), clip_import=(scene, source, filename))
+        return operation_id
 
     async def import_scene(self, project, scene, source, filename):
         width, height = self.resolution(project)

@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { importScenesInOrder, videoSourceLabel, type ImportStatus, type SceneImport } from "../lib/scene-import-queue";
+import { importScenesInOrder, videoSourceLabel, type ImportOperation, type ImportStatus, type SceneImport } from "../lib/scene-import-queue";
 
 type Brief = {
   topic: string; language: string; style: string; durationSeconds: number;
   aspect: string; gender: string; resolution: string; backgroundAudio: boolean;
 };
 type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null; provider?: string;
-  filename?: string | null; sourceDuration?: number; importedScenes?: number; sceneCount?: number;
+  filename?: string | null; language?: string | null; sourceDuration?: number; importedScenes?: number; sceneCount?: number;
 };
 type Scene = { id: string; index: number; start: number; duration: number; description: string; narration: string; prompt: string };
 type ProjectSummary = { id: string; topic: string; status: string };
@@ -40,12 +40,13 @@ const stageLabels: Record<string, string> = {
 const displayStatus = (value: string) => value.replaceAll("_", " ");
 const assetUrl = (projectId: string, assetId: string) => `${projectsUrl}/${projectId}/assets/${assetId}`;
 
-async function request<T>(url: string, signal?: AbortSignal, payload?: object): Promise<T> {
+async function request<T>(url: string, signal?: AbortSignal, payload?: object, digest?: string): Promise<T> {
   const upload = payload instanceof File;
   const response = await fetch(url, payload ? {
     method: "POST",
     headers: upload ? {
       "Content-Type": "video/mp4",
+      ...(digest && { "X-Flow-Clip-Sha256": digest }),
       "X-Flow-Clip-Name": encodeURIComponent(Array.from(payload.name).slice(0, 150).join("")),
     } : { "Content-Type": "application/json" },
     body: upload ? payload : JSON.stringify(payload), signal,
@@ -98,7 +99,7 @@ function PaidImageConsent({ checked, onChange, disabled, estimate, cap }: {
 function ProjectView({ project, pending, renderPaused, importProgress, onAction, onImport, onCancelImport }: {
   project: Project; pending: boolean; renderPaused: boolean; onAction: (action: string, extra?: object) => void;
   importProgress: SceneProgress;
-  onImport: (items: SceneImport[], onImported: (sceneId: string) => void) => void;
+  onImport: (items: SceneImport[], onImported: (item: SceneImport) => void) => void;
   onCancelImport: () => void;
 }) {
   const [acknowledgedHive, setAcknowledgedHive] = useState(false);
@@ -111,13 +112,17 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
   const [selectedClips, setSelectedClips] = useState<Record<string, File>>({});
   const imports = project.scenes.flatMap((scene) => {
     const file = selectedClips[scene.id];
-    const replace = project.assets.some((asset) => asset.sceneId === scene.id && asset.provider === "manual");
-    return file ? [{ sceneId: scene.id, file, replace }] : [];
+    const existing = project.assets.find((asset) => asset.sceneId === scene.id && asset.provider === "manual");
+    return file ? [{ sceneId: scene.id, file, replaceAssetId: existing?.id ?? null }] : [];
   });
   function submitImports(items: SceneImport[]) {
-    const replacements = items.filter((item) => item.replace);
-    if (replacements.length && !window.confirm(`Replace ${replacements.length} existing imported clip(s)?`)) return;
-    onImport(items, (sceneId) => setSelectedClips((previous) => {
+    const replacements = items.filter((item) => item.replaceAssetId).map(({ sceneId, file }) => {
+      const scene = project.scenes.find((item) => item.id === sceneId);
+      return `Scene ${(scene?.index ?? 0) + 1} · ${file.name}`;
+    });
+    if (replacements.length && !window.confirm(`Replace the imported clips for these selections?\n${replacements.join("\n")}`)) return;
+    onImport(items, ({ sceneId, file }) => setSelectedClips((previous) => {
+      if (previous[sceneId] !== file) return previous;
       const remaining = { ...previous };
       delete remaining[sceneId];
       return remaining;
@@ -260,7 +265,7 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
                   Import scene {scene.index + 1}
                 </button>
               </>}
-              {progress && <p role={progress.status === "failed" ? "alert" : "status"}>
+              {progress && <p>
                 {importLabels[progress.status]}{progress.message && ` · ${progress.message}`}
               </p>}
             </article>;
@@ -276,9 +281,10 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
         {lastApproved && <a href={`${lastApproved}?download=true`}>Download last approved MP4</a>}
         {final ? <>
           <p>{videoSourceLabel(finalAsset?.importedScenes, finalAsset?.sceneCount)}</p>
-          <p>Audio · {project.brief.language} script and subtitles with the existing Studio mock voiceover tone</p>
+          <p>Audio · Studio mock tone · no spoken narration</p>
+          {captions && <p>Subtitles · {captions.language || `Unverified language (project setting: ${project.brief.language})`}</p>}
           <video key={final} controls preload="metadata" className="studio-final" aria-label="Final MP4" src={final}>
-            {captions && <track kind="subtitles" label={project.brief.language} src={assetUrl(project.id, captions.id)} default />}
+            {captions && <track kind="subtitles" label={captions.language || "Unverified language"} srcLang={captions.language === "Uzbek" ? "uz" : undefined} src={assetUrl(project.id, captions.id)} default />}
           </video>
           <div className="studio-actions">
             <a href={`${final}?download=true`}>Download MP4</a>
@@ -314,6 +320,8 @@ export function Studio() {
   const [error, setError] = useState("");
   const [storage, setStorage] = useState<Storage | null>(null);
   const [importProgress, setImportProgress] = useState<SceneProgress>({});
+  const [importAnnouncement, setImportAnnouncement] = useState("");
+  const activeImportId = useRef<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -373,23 +381,42 @@ export function Studio() {
     }
   }
 
-  async function importClips(project: Project, items: SceneImport[], onImported: (sceneId: string) => void) {
+  async function importClips(project: Project, items: SceneImport[], onImported: (item: SceneImport) => void) {
     setPending(true);
     setImportProgress({});
     setError("");
     try {
       await importScenesInOrder(items, project, {
-        upload: ({ sceneId, file, replace }, expectedExport) => {
+        upload: async ({ sceneId, file, replaceAssetId }, expectedExport) => {
           if (!file.size || file.size > 32 * 1024 * 1024) {
             throw new Error("Choose a nonempty MP4 file up to 32 MiB.");
           }
-          return request<Project>(`${projectsUrl}/${project.id}/scenes/${sceneId}/import?expected_export=${expectedExport}${replace ? "&confirm_replace=yes" : ""}`, undefined, file);
+          const params = new URLSearchParams({ expected_export: expectedExport });
+          let digest: string | undefined;
+          if (replaceAssetId) {
+            params.set("replace_asset", replaceAssetId);
+            const hash = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+            digest = Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, "0")).join("");
+          }
+          const accepted = await request<Project & { importOperationId: string }>(
+            `${projectsUrl}/${project.id}/scenes/${sceneId}/import?${params}`, undefined, file, digest,
+          );
+          activeImportId.current = accepted.importOperationId;
+          return accepted;
         },
-        refresh: () => request<Project>(`${projectsUrl}/${project.id}`),
+        refresh: (operationId) => request<{ operation: ImportOperation; project: Project }>(
+          `${projectsUrl}/${project.id}/imports/${operationId}`,
+        ),
         update: setProject,
         report: (sceneId, status, message) => {
           setImportProgress((previous) => ({ ...previous, [sceneId]: { status, message } }));
-          if (status === "imported") onImported(sceneId);
+          const scene = project.scenes.find((item) => item.id === sceneId);
+          setImportAnnouncement(`Scene ${(scene?.index ?? 0) + 1}. ${importLabels[status]}${message ? `. ${message}` : ""}`);
+          if (status === "imported") {
+            const imported = items.find((item) => item.sceneId === sceneId);
+            if (imported) onImported(imported);
+          }
+          if (status !== "rendering") activeImportId.current = null;
         },
       });
     } finally {
@@ -399,6 +426,7 @@ export function Studio() {
 
   return (
     <div className="page-frame studio">
+      <p className="sr-only" aria-live="polite" aria-atomic="true">{importAnnouncement}</p>
       <div className="breadcrumb">Workspace / <span>Media Studio</span></div>
       <header className="page-heading"><h1>Media Studio</h1><p>Produce and review a local video. Mock media is the default.</p></header>
       {error && <p role="alert" className="error-text">{error}</p>}
@@ -424,8 +452,12 @@ export function Studio() {
           onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })}
           importProgress={importProgress}
           onImport={(items, onImported) => void importClips(project, items, onImported)}
-          onCancelImport={() => void request<Project>(`${projectsUrl}/${project.id}/actions`, undefined, { action: "cancel" })
-            .catch((failure) => setError(failure.message))} />}
+          onCancelImport={() => {
+            const operationId = activeImportId.current;
+            if (operationId) void request<Project>(`${projectsUrl}/${project.id}/actions`, undefined, {
+              action: "cancel", cancelImportOperationId: operationId,
+            }).catch((failure) => setError(failure.message));
+          }} />}
       </div>
     </div>
   );
