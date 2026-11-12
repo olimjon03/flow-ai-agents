@@ -208,3 +208,59 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(project["assets"], approved["assets"])
                 self.assertEqual(project["lastApprovedAssetId"], approved_id)
                 self.assertEqual((await self.client.get(f"{self.base}/assets/{approved_id}")).status_code, 200)
+
+    async def test_five_uzbek_scenes_export_approve_and_preserve_under_storage_floor(self):
+        original = await self.prepare()
+        project = original
+        self.assertEqual(project["brief"]["language"], "Uzbek")
+        self.assertEqual([scene["duration"] for scene in project["scenes"]], [6] * 5)
+        clip = await self.fixture("libx264")
+        for index, scene in enumerate(original["scenes"], 1):
+            route = f"{self.base}/scenes/{scene['id']}/import?expected_export={project['finalAssetId']}"
+            uploaded = await self.client.post(route, content=clip, headers={
+                "Content-Type": "video/mp4", "X-Flow-Clip-Name": f"..%2F{index}-sahna.mp4",
+            })
+            self.assertEqual(uploaded.status_code, 202, uploaded.text)
+            await asyncio.wait_for(self.studio.worker, 35)
+            project = await self.project()
+            self.assertEqual(project["status"], "awaiting_approval", project["error"])
+            final = next(a for a in project["assets"] if a["id"] == project["finalAssetId"])
+            self.assertEqual((final["importedScenes"], final["sceneCount"], final["duration"]), (index, 5, 30))
+            imported = next(a for a in project["assets"] if a["sceneId"] == scene["id"] and a.get("provider") == "manual")
+            self.assertEqual(imported["filename"], f"{index}-sahna.mp4")
+            self.assertAlmostEqual(imported["sourceDuration"], 1, places=2)
+        approved_id = project["finalAssetId"]
+        approved = await self.client.post(self.base + "/actions", json={"action": "approve", "reviewedAssetId": approved_id})
+        self.assertEqual(approved.status_code, 200)
+        storage = (await self.client.get("/api/studio/storage")).json()
+        self.assertEqual(storage["archivedExports"], 1)
+        self.assertGreater(storage["archiveBytes"], 0)
+        archived = await self.client.get(f"{self.base}/assets/{original['finalAssetId']}")
+        self.assertEqual(archived.status_code, 200)
+
+        with patch.dict(os.environ, {"FLOW_STUDIO_MIN_FREE_MIB": "128"}), patch(
+            "flow_api.studio.store.shutil.disk_usage", return_value=type("Disk", (), {"free": 64 * 1024 * 1024})(),
+        ):
+            storage = (await self.client.get("/api/studio/storage")).json()
+            self.assertTrue(storage["renderPaused"])
+            self.assertEqual(storage["floorBytes"], 128 * 1024 * 1024)
+            for request in (
+                self.client.post(self.base + "/actions", json={"action": "regenerate", "stage": "video"}),
+                self.client.post(self.route(approved.json()) + "&confirm_replace=yes", content=clip, headers={"Content-Type": "video/mp4"}),
+            ):
+                blocked = await request
+                self.assertEqual(blocked.status_code, 507, blocked.text)
+                self.assertIn("free disk space", blocked.json()["detail"])
+        self.assertEqual((await self.project())["approvedAssetId"], approved_id)
+        self.assertEqual((await self.client.get(f"{self.base}/assets/{approved_id}")).status_code, 200)
+        self.assertEqual((await self.client.get(f"{self.base}/assets/{original['finalAssetId']}")).content, archived.content)
+
+        self.assertEqual((await self.client.post(self.base + "/actions", json={
+            "action": "regenerate", "stage": "image",
+        })).status_code, 200)
+        await asyncio.wait_for(self.studio.worker, 35)
+        regenerated = await self.project()
+        self.assertEqual(regenerated["status"], "awaiting_approval", regenerated["error"])
+        self.assertEqual(regenerated["lastApprovedAssetId"], approved_id)
+        self.assertEqual({a["id"] for a in regenerated["assets"] if a.get("provider") == "manual"},
+                         {a["id"] for a in project["assets"] if a.get("provider") == "manual"})

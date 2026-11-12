@@ -78,6 +78,10 @@ class DailyVideoTests(unittest.IsolatedAsyncioTestCase):
         job_id = self.scheduler.enqueue("a" * 32)
         # A queued job survives rebuilding the scheduler.
         restarted = DailyVideo(self.studio, lambda: self.now)
+        with patch.object(self.studio.store, "disk_status", return_value={"renderPaused": True}):
+            restarted.step()
+        self.assertEqual(restarted.snapshot()["jobs"][0]["state"], "queued")
+        self.assertIsNone(self.studio.store.get(job_id))
         restarted.step()
         await asyncio.wait_for(self.studio.worker, 35)
         restarted.step()

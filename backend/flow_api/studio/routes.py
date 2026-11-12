@@ -1,10 +1,13 @@
 """Media Studio API. Only project-generated media is served."""
 
 import asyncio
+import errno
 import tempfile
+import unicodedata
 from pathlib import Path
 from ipaddress import ip_address
 from typing import Annotated, Literal
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -13,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
 from ..agents import NANODOLLARS
 from ..local_access import require_local_mutation
 from .hive_image_provider import IMAGE_COST
-from .media import MediaError
+from .media import MediaError, StorageFull
 from .store import ID, MEDIA_TYPES
 from .video_import import MAX_MP4_BYTES, verify_mp4_signature
 
@@ -96,6 +99,12 @@ def project_for(request, project_id):
     return project
 
 
+@router.get("/storage")
+async def storage(request: Request):
+    require_local_mutation(request)
+    return request.app.state.studio.store.storage_status()
+
+
 @router.get("/projects")
 async def projects(request: Request):
     return [{"id": p["id"], "topic": p["brief"]["topic"], "status": p["status"], "createdAt": p["createdAt"]}
@@ -128,6 +137,8 @@ async def action(request: Request, project_id: str):
             project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages, data.acknowledgeUncertainHive, reviewed_asset_id=data.reviewedAssetId, confirm_discard=data.confirmDiscardImported,
         )
         return project_response(request, request.app.state.studio.store.get(updated["id"]))
+    except StorageFull as error:
+        raise HTTPException(507, str(error)) from None
     except MediaError as error:
         raise HTTPException(409, str(error)) from None
 
@@ -145,10 +156,19 @@ async def import_clip(request: Request, project_id: str, scene_id: str, expected
     length = request.headers.get("content-length")
     if length and (not length.isascii() or not length.isdigit() or len(length) > 9 or int(length) > MAX_MP4_BYTES):
         raise HTTPException(413, "The MP4 exceeds the 32 MiB limit.")
+    encoded_name = request.headers.get("x-flow-clip-name", "")
+    if len(encoded_name) > 2048:
+        raise HTTPException(422, "The clip filename is too long.")
+    try:
+        name = unquote(encoded_name, errors="strict").replace("\\", "/").rsplit("/", 1)[-1]
+    except UnicodeDecodeError:
+        raise HTTPException(422, "The clip filename is invalid.") from None
+    filename = "".join(character for character in name if not unicodedata.category(character).startswith("C")).strip()[:150]
     studio = request.app.state.studio
     confirmed = confirm_replace == "yes"
     try:
         studio.check_clip_import(project_for(request, project_id), scene_id, expected_export, confirmed)
+        studio.require_render_space(int(length) if length else MAX_MP4_BYTES)
         with studio.store.upload_slot() as acquired:
             if not acquired:
                 raise HTTPException(429, "Another MP4 upload is in progress. Try again shortly.")
@@ -163,9 +183,15 @@ async def import_clip(request: Request, project_id: str, scene_id: str, expected
                                 raise HTTPException(413, "The MP4 exceeds the 32 MiB limit.")
                             file.write(chunk)
                 verify_mp4_signature(source)
-                studio.launch_clip_import(project_for(request, project_id), scene_id, expected_export, source, confirmed)
+                studio.launch_clip_import(project_for(request, project_id), scene_id, expected_export, source, confirmed, filename or None)
     except TimeoutError:
         raise HTTPException(408, "The MP4 upload timed out.") from None
+    except OSError as error:
+        if error.errno in {errno.ENOSPC, errno.EDQUOT}:
+            raise HTTPException(507, "There is insufficient disk space for the MP4 upload.") from None
+        raise HTTPException(500, "Could not write the local MP4 upload.") from None
+    except StorageFull as error:
+        raise HTTPException(507, str(error)) from None
     except MediaError as error:
         raise HTTPException(409, str(error)) from None
     return project_response(request, project_for(request, project_id))

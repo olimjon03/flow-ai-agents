@@ -50,6 +50,7 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await page.getByLabel("Import MP4 for scene 1").setInputFiles({
     name: "motion.mp4", mimeType: "video/mp4", buffer: movingClip,
   });
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
   await expect(page.getByText("Imported MP4", { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("status").filter({ hasText: /^awaiting approval$/ })).toBeVisible();
   const [projectPath, oldDownload] = download!.split("/assets/");
@@ -81,4 +82,56 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await expect(page.getByLabel("Final MP4")).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test("imports five moving clips sequentially and approves the Uzbek export", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto("/media-studio");
+  await page.getByLabel("Topic", { exact: true }).fill("Uzbek five-scene project");
+  await page.getByRole("button", { name: "Create project" }).click();
+  await page.getByRole("button", { name: "Start mock workflow" }).click();
+  await page.getByRole("button", { name: "Approve script and storyboard" }).click();
+  const status = (value: string) => page.getByRole("status").filter({ hasText: new RegExp(`^${value}$`) });
+  await expect(status("awaiting approval")).toBeVisible({ timeout: 35_000 });
+  await expect(page.getByText("Mock-only video · no imported clips")).toBeVisible();
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(status("approved")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Five-scene MP4 import" })).toBeVisible();
+
+  const buffer = execFileSync(process.env.FLOW_FFMPEG_BIN || "ffmpeg", [
+    "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24",
+    "-t", "1", "-c:v", "libx264", "-threads", "2", "-movflags", "frag_keyframe+empty_moov",
+    "-f", "mp4", "pipe:1",
+  ]);
+  const submitted: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/import")) submitted.push(request.url());
+  });
+  for (let scene = 5; scene >= 1; scene--) {
+    await page.getByLabel(`Import MP4 for scene ${scene}`).setInputFiles({
+      name: `sahna-${scene}.mp4`, mimeType: "video/mp4", buffer,
+    });
+  }
+  await page.getByRole("button", { name: "Import selected clips in scene order" }).click();
+  await expect(page.getByText("All 5 scenes use imported video")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText("Imported MP4", { exact: true })).toHaveCount(5);
+  await expect(page.getByText(/Source 1\.00s → target 6s/)).toHaveCount(5);
+  await expect(page.getByText("sahna-5.mp4", { exact: true })).toBeVisible();
+  expect(submitted).toHaveLength(5);
+  expect(new Set(submitted.map((url) => new URL(url).searchParams.get("expected_export"))).size).toBe(5);
+  await expect(page.getByText(/Uzbek script and subtitles/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download last approved MP4" })).toBeVisible();
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(status("approved")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Studio storage" }).getByText(/Archived exports · [1-9]/)).toBeVisible();
+  await page.route("**/api/studio/storage", async (route) => {
+    const response = await route.fetch();
+    const storage = await response.json();
+    await route.fulfill({ json: { ...storage, freeBytes: 0, renderPaused: true } });
+  });
+  await page.reload();
+  await expect(page.getByRole("alert").filter({ hasText: /Rendering paused/ })).toBeVisible();
+  await page.getByLabel("Regenerate stage").selectOption("video");
+  await expect(page.getByRole("button", { name: "Regenerate", exact: true })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "Download MP4", exact: true })).toBeVisible();
 });

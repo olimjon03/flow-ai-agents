@@ -32,8 +32,11 @@ export async function forwardClipImport(request: Request, projectId: string, sce
       process.env.FLOW_OFFICE_API_URL || "http://127.0.0.1:8001");
     upstream.searchParams.set("expected_export", expectedExport!);
     if (confirmReplace) upstream.searchParams.set("confirm_replace", confirmReplace);
+    const headers = new Headers({ "Content-Type": "video/mp4" });
+    const filename = request.headers.get("x-flow-clip-name");
+    if (filename) headers.set("X-Flow-Clip-Name", filename);
     const options: RequestInit & { duplex: "half" } = {
-      method: "POST", headers: { "Content-Type": "video/mp4" }, body: request.body, duplex: "half",
+      method: "POST", headers, body: request.body, duplex: "half",
       cache: "no-store", redirect: "error", signal: AbortSignal.any([request.signal, AbortSignal.timeout(65_000)]),
     };
     const response = await fetcher(upstream, options);

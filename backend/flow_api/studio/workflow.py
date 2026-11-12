@@ -14,7 +14,7 @@ from ..orchestrator import AGENTS, now
 from .hive_image_provider import IMAGE_COST, HiveImageRejected
 from .video_import import ManualVideoProvider
 from .storyboard import deepseek_scenes, scene_record
-from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, VideoProvider, publish_image, write_audio
+from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, StorageFull, MockImage, MockVoice, VideoProvider, publish_image, write_audio
 
 DESKS = {
     "research": "scout", "script": "quill", "review": "guard", "storyboard": "muse",
@@ -168,9 +168,15 @@ class Studio:
         return (self.worker is not None and not self.worker.done()
                 or self.office.run is not None and self.office.run["status"] == "running")
 
+    def require_render_space(self, reserve=0):
+        disk = self.store.disk_status()
+        if disk["freeBytes"] < disk["floorBytes"] + reserve:
+            raise StorageFull("Rendering paused because free disk space is below the Studio safety margin. Free disk space and retry.")
+
     def launch_daily(self, project):
         if not project.get("dailyProfile") or project["status"] != "draft":
             raise MediaError("The daily mock project is not ready.")
+        self.require_render_space()
         return self.launch(project, (*PLAN, *MEDIA), daily=True)
 
     def update(self, project, stage, status, progress, message):
@@ -283,6 +289,7 @@ class Studio:
                        and project["script"] and project["scenes"] and not project["scriptApproved"])
         if action == "approve-script" and can_approve:
             self.require_manual_discard_confirmation(project, confirm_discard)
+            self.require_render_space()
             if allow_paid_images:
                 self.check_paid_images(project, 5 if allow_paid else len(project["scenes"]))
             if allow_paid and (self.office.provider.mode != "deploy" or project["brief"]["durationSeconds"] != 30):
@@ -307,6 +314,7 @@ class Studio:
                 return self.regenerate(project, DESKS, PLAN)
             if not project["scriptApproved"]:
                 raise MediaError("Approve the storyboard before producing media.")
+            self.require_render_space()
             selected = DEPENDENTS[stage]
             required = set(selected)
             for prerequisite in ("image", "voice", "video"):
@@ -393,6 +401,7 @@ class Studio:
                     if "video" in stages:
                         if clip_import:
                             async def import_scene(current):
+                                self.require_render_space()
                                 await self.import_scene(current, *clip_import)
                             await self.run_stage(project, "video", import_scene)
                         else:
@@ -602,8 +611,9 @@ class Studio:
         self.require_manual_discard_confirmation(project, confirmed, scene_id)
         return scene
 
-    def launch_clip_import(self, project, scene_id, expected_export, upload, confirmed=False):
+    def launch_clip_import(self, project, scene_id, expected_export, upload, confirmed=False, filename=None):
         scene = self.check_clip_import(project, scene_id, expected_export, confirmed)
+        self.require_render_space()
         for item in project["scenes"]:
             if item["id"] != scene_id:
                 self.require_asset(project, ".mp4", "video", item["id"])
@@ -620,18 +630,19 @@ class Studio:
         self.reset(project, ("editor",))
         project["assets"] = [asset for asset in project["assets"]
                              if not (asset["stage"] == "video" and asset["sceneId"] == scene_id)]
-        return self.launch(project, ("video", "editor"), clip_import=(scene, source))
+        return self.launch(project, ("video", "editor"), clip_import=(scene, source, filename))
 
-    async def import_scene(self, project, scene, source):
+    async def import_scene(self, project, scene, source, filename):
         width, height = self.resolution(project)
         try:
             await self.generate_asset(project, "video", ".mp4", "Imported scene clip",
                                       lambda path: self.manual_video.generate(source, path, scene["duration"], (width, height)),
-                                      scene["id"], width=width, height=height, duration=scene["duration"], provider="manual")
+                                      scene["id"], width=width, height=height, duration=scene["duration"], provider="manual", filename=filename)
         finally:
             source.unlink(missing_ok=True)
 
     async def clips(self, project):
+        self.require_render_space()
         size = self.resolution(project)
         manual_scenes = {asset["sceneId"] for asset in project["assets"] if asset.get("provider") == "manual"}
         for scene in project["scenes"]:
@@ -644,6 +655,7 @@ class Studio:
             self.update(project, "video", "working", (scene["index"] + 1) * 90 // len(project["scenes"]), "Scene clip ready")
 
     async def export(self, project):
+        self.require_render_space()
         clips = [self.require_asset(project, ".mp4", "video", scene["id"]) for scene in project["scenes"]]
         audio = self.require_asset(project, ".wav", "voice")
         subtitles = self.require_asset(project, ".srt", "voice")
@@ -663,7 +675,9 @@ class Studio:
             if self.replacement:
                 await self.manual_video.validate_export(path, duration, (width, height))
 
+        imported_count = sum(asset.get("provider") == "manual" and asset["stage"] == "video" for asset in project["assets"])
         project["finalAssetId"] = await self.generate_asset(
             project, "editor", ".mp4", "Final MP4", render,
             width=width, height=height, duration=duration,
+            importedScenes=imported_count, sceneCount=len(clips),
         )

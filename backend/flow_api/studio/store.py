@@ -2,6 +2,7 @@
 
 import fcntl
 import json
+import os
 import re
 import sqlite3
 import shutil
@@ -55,6 +56,22 @@ class ProjectStore:
                             shutil.rmtree(directory)
                     except FileNotFoundError:
                         continue
+
+    def disk_status(self):
+        floor = int(os.getenv("FLOW_STUDIO_MIN_FREE_MIB", "1024")) * 1024 * 1024
+        if floor < 0:
+            raise ValueError("FLOW_STUDIO_MIN_FREE_MIB must be non-negative.")
+        free = shutil.disk_usage(self.root).free
+        return {"freeBytes": free, "floorBytes": floor, "renderPaused": free < floor}
+
+    def storage_status(self):
+        with closing(self.connect()) as db:
+            archived = db.execute(
+                "SELECT count(*), coalesce(sum(json_extract(asset.value, '$.bytes')), 0) "
+                "FROM projects, json_each(projects.data, '$.assets') AS asset "
+                "WHERE json_extract(asset.value, '$.archived') = 1"
+            ).fetchone()
+        return {**self.disk_status(), "archivedExports": archived[0], "archiveBytes": archived[1]}
 
     def connect(self):
         return sqlite3.connect(self.db, timeout=3)
