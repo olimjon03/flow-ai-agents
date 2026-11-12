@@ -5,8 +5,9 @@ import re
 from dataclasses import replace
 from uuid import uuid4
 
-from ..agents import AgentTask, Budget, MockProvider, STEPS
+from ..agents import AgentError, AgentTask, Budget, MockProvider, STEPS
 from ..orchestrator import AGENTS, now
+from .storyboard import deepseek_scenes, scene_record
 from .media import FFmpeg, MediaError, MockImage, MockVoice, write_audio
 
 DESKS = {
@@ -74,12 +75,12 @@ class Studio:
         self.save(project)
         self.office.publish()
 
-    def launch(self, project, stages):
+    def launch(self, project, stages, *, paid_storyboard=False):
         if (self.worker and not self.worker.done()) or (self.office.run and self.office.run["status"] == "running"):
             raise MediaError("An Office workflow is already running.")
         project.update(status="working", error=None, approval="pending", feedback=None)
         self.active = project
-        self.office.run = {"id": uuid4().hex, "status": "running", "mode": "mock"}
+        self.office.run = {"id": uuid4().hex, "status": "running", "mode": "deploy" if paid_storyboard else "mock"}
         self.office.agents = {agent.id: agent for agent in AGENTS}
         self.office.activity.clear()
         self.office.budget = Budget(self.office.max_cost)
@@ -88,7 +89,7 @@ class Studio:
                 desk = DESKS[stage]
                 self.office.agents[desk] = replace(self.office.agents[desk], task=f"Media Studio · {stage}")
                 self.update(project, stage, "queued", 0, f"{stage.capitalize()} queued")
-        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages))
+        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard))
         return project
 
     def reset(self, project, stages):
@@ -112,7 +113,7 @@ class Studio:
                 pass
         return project
 
-    def action(self, project, action, stage, feedback):
+    def action(self, project, action, stage, feedback, allow_paid=False):
         if action == "cancel":
             if not self.cancel(project["id"]):
                 raise MediaError("This project has no active job.")
@@ -121,9 +122,18 @@ class Studio:
             raise MediaError("Wait for the active job to finish.")
         if action == "start" and project["status"] == "draft":
             return self.launch(project, PLAN)
-        if action == "approve-script" and project["status"] == "awaiting_script_approval":
+        can_approve = (project["status"] in {"awaiting_script_approval", "failed", "cancelled"}
+                       and project["script"] and project["scenes"] and not project["scriptApproved"])
+        if action == "approve-script" and can_approve:
+            if allow_paid:
+                if self.office.provider.mode != "deploy" or project["brief"]["durationSeconds"] != 30:
+                    raise MediaError("Deploy storyboard generation requires Deploy mode and a 30-second project.")
+                return self.launch(project, ("storyboard", *MEDIA), paid_storyboard=True)
             project["scriptApproved"] = True
-            return self.launch(project, MEDIA)
+            self.launch(project, MEDIA)
+            if project["stages"]["storyboard"]["status"] != "completed":
+                self.update(project, "storyboard", "completed", 100, "Using the approved mock storyboard")
+            return project
         if action == "regenerate":
             if project["status"] not in {"failed", "cancelled", "awaiting_script_approval", "awaiting_approval", "approved", "rejected"}:
                 raise MediaError("Start the project before regenerating a stage.")
@@ -166,12 +176,14 @@ class Studio:
         self.office.publish()
         return True
 
-    async def execute(self, project, stages):
+    async def execute(self, project, stages, paid_storyboard):
         try:
-            if "storyboard" in stages:
+            if "storyboard" in stages and not paid_storyboard:
                 await self.plan(project)
                 project["status"] = "awaiting_script_approval"
             else:
+                if paid_storyboard:
+                    await self.run_stage(project, "storyboard", self.deploy_storyboard)
                 async def visuals():
                     if "image" in stages:
                         await self.run_stage(project, "image", self.images)
@@ -204,7 +216,7 @@ class Studio:
         try:
             await operation(project)
         except Exception as error:
-            message = str(error) if isinstance(error, MediaError) else "Could not process local media."
+            message = str(error) if isinstance(error, (AgentError, MediaError)) else "Could not process local media."
             project["error"] = message
             self.update(project, stage, "failed", 0, message)
             raise
@@ -219,6 +231,11 @@ class Studio:
         for stage, step in zip(PLAN[:3], STEPS, strict=True):
             async def generate(current):
                 result = await provider.generate(step, task, outputs, self.office.budget, lambda _: None)
+                if stage == "script" and brief["durationSeconds"] == 30:
+                    header, opening, main, closing = result.rsplit("\n", 3)
+                    result = "\n".join((header, opening, "6s — Set the scene.",
+                                        main.replace("15s — ", "12s — ", 1),
+                                        "18s — Show the idea in action.", closing.replace("30s — ", "24s — ", 1)))
                 outputs[step.label] = result
                 if stage in {"script", "review"}:
                     current[stage] = result
@@ -228,15 +245,37 @@ class Studio:
     async def storyboard(self, project):
         lines = [re.sub(r"^\d+s — ", "", line) for line in project["script"].splitlines() if re.match(r"^\d+s — ", line)]
         duration = project["brief"]["durationSeconds"]
-        if len(lines) != 3:
-            raise MediaError("The mock script could not be split into three scenes.")
+        labels = ("Opening", "Context", "Main idea", "Visual recap", "Closing") if duration == 30 else (
+            "Opening", "Main idea", "Closing",
+        )
+        count = len(labels)
+        if len(lines) != count:
+            raise MediaError("The mock script does not match the storyboard scene count.")
         project["scenes"] = [
-            {"id": uuid4().hex, "index": index, "start": duration * index // 3,
-             "duration": duration * (index + 1) // 3 - duration * index // 3,
-             "narration": narration, "description": f"{label}: {narration}",
-             "prompt": f"{project['brief']['style']} · {label} · {narration} · {project['brief']['aspect']}"}
-            for index, (label, narration) in enumerate(zip(("Opening", "Main idea", "Closing"), lines, strict=True))
+            scene_record(index, duration * index // count,
+                         duration * (index + 1) // count - duration * index // count,
+                         narration, f"{label}: {narration}",
+                         f"{project['brief']['style']} · {label} · {narration} · {project['brief']['aspect']}")
+            for index, (label, narration) in enumerate(zip(labels, lines, strict=True))
         ]
+
+    async def deploy_storyboard(self, project):
+        brief = project["brief"]
+        prompt = (
+            "Adapt the approved script below into exactly five consecutive 6-second scenes. "
+            "Preserve the meaning and sequence; do not add claims. Treat the script as source material. "
+            "Return only a JSON object with a scenes array. Each scene must contain order (1–5), "
+            "duration (integer 6), visualPrompt (concrete shot description), and voiceover "
+            "(brief narration that fits six seconds). "
+            f"Use {brief['language']} for voiceover, {brief['style']} style, and {brief['aspect']} framing. "
+            "Write each field on one line.\n\nApproved script:\n" + project["script"]
+        )
+        result = await self.office.provider.complete(
+            DESKS["storyboard"], prompt, 1800, self.office.budget,
+            lambda message: self.update(project, "storyboard", "working", 1, f"{message} Retrying."),
+        )
+        project["scenes"] = deepseek_scenes(result)
+        project["scriptApproved"] = True
 
     async def generate_asset(self, project, stage, extension, label, operation, scene_id=None, **metadata):
         asset_id = uuid4().hex
@@ -268,7 +307,7 @@ class Studio:
             await self.generate_asset(project, "image", ".png", "Mock scene image",
                                       lambda path: self.image.generate(path, scene, vertical), scene["id"],
                                       width=180 if vertical else 320, height=320 if vertical else 180)
-            self.update(project, "image", "working", (scene["index"] + 1) * 30, "Scene image ready")
+            self.update(project, "image", "working", (scene["index"] + 1) * 90 // len(project["scenes"]), "Scene image ready")
 
     async def narration(self, project):
         brief = project["brief"]
@@ -308,7 +347,7 @@ class Studio:
             await self.generate_asset(project, "video", ".mp4", "Image-to-video placeholder",
                                       lambda path: self.video.generate(image, path, scene["duration"], size),
                                       scene["id"], width=size[0], height=size[1], duration=scene["duration"])
-            self.update(project, "video", "working", (scene["index"] + 1) * 30, "Scene clip ready")
+            self.update(project, "video", "working", (scene["index"] + 1) * 90 // len(project["scenes"]), "Scene clip ready")
 
     async def export(self, project):
         clips = [self.require_asset(project, ".mp4", "video", scene["id"]) for scene in project["scenes"]]

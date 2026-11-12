@@ -10,7 +10,7 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await page.getByRole("button", { name: "Start mock workflow" }).click();
   await expect(page.getByRole("heading", { name: "Storyboard and editing timeline" })).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: /^awaiting script approval$/ })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Scene [1-3] ·/ })).toHaveCount(3);
+  await expect(page.getByRole("heading", { name: /Scene [1-5] ·/ })).toHaveCount(5);
 
   const office = await page.context().newPage();
   await office.setViewportSize({ width: 1536, height: 900 });
@@ -24,7 +24,7 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   }
   await office.close();
 
-  await expect(page.getByRole("img", { name: /Mock image for scene/ })).toHaveCount(3);
+  await expect(page.getByRole("img", { name: /Mock image for scene/ })).toHaveCount(5);
   await expect(page.getByLabel(/Placeholder tone/)).toBeVisible();
   await expect(page.getByLabel("Scene 1 video")).toBeVisible();
   const final = page.getByLabel("Final MP4");
