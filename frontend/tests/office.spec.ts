@@ -192,14 +192,16 @@ test("orbits through a full turn and switches top and isometric presets", async 
   const scout = page.getByRole("button", { name: "Scout workstation", exact: true });
   const quill = page.getByRole("button", { name: "Quill workstation", exact: true });
   await expect(scout).toBeVisible();
-  const canvas = page.locator(".office-scene canvas");
-  const bounds = (await canvas.boundingBox())!;
+  const canvas = page.getByLabel("3D office view. Use arrow keys to pan.", { exact: true });
+  await expect(canvas).toBeVisible();
   const readOrder = async () => (await scout.boundingBox())!.x - (await quill.boundingBox())!.x;
   const initial = await readOrder();
 
   async function halfTurn() {
+    const bounds = (await canvas.boundingBox())!;
     const x = bounds.x + 22;
-    const y = bounds.y + 44;
+    const y = bounds.y + bounds.height - 22;
+    expect(await canvas.evaluate((element, point) => document.elementFromPoint(point.x, point.y) === element, { x, y })).toBe(true);
     await page.mouse.move(x, y);
     await page.mouse.down();
     await page.mouse.move(x + bounds.height / 2, y, { steps: 8 });

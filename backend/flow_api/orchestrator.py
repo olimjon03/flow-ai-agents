@@ -75,14 +75,14 @@ class DemoOrchestrator:
         self.handoff_sequence = 0
         self.handoffs = deque(maxlen=32)
         self.provider = provider or MockProvider(tick_seconds * 2)
-        self.max_cost = max_cost if max_cost is not None else budget_limit("0.05")
+        self.max_cost = max_cost if max_cost is not None else budget_limit("0.01" if self.provider.mode == "deploy" else "0.05")
         self.budget = Budget(self.max_cost)
 
     def snapshot(self):
         return {
             "confirmedAt": self.updated_at,
             "handoffs": list(self.handoffs),
-            "simulation": not self.run or self.run.get("mode") != "openai",
+            "simulation": not self.run or self.run.get("mode") in (None, "mock"),
             "providerMode": self.provider.mode,
             "usagePeriod": "Current workflow",
             "run": dict(self.run) if self.run else None,

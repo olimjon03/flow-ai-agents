@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { demoSnapshot } from "../lib/office/demo";
 
 test("the 3D office receives real simulated task events and reconnects to the latest snapshot", async ({ page, request }) => {
   test.setTimeout(45_000);
@@ -106,4 +107,45 @@ test("animates backend handoffs once and clears movement when the run is cancell
   if (await enable3D.isVisible()) await enable3D.click();
   await expect(canvas).toBeVisible({ timeout: 15_000 });
   await expect(nova).toHaveAttribute("data-motion", "idle");
+});
+
+test("Deploy consent names the provider and is required before submission", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.addInitScript((snapshot) => {
+    class DeployEvents extends EventTarget {
+      constructor() {
+        super();
+        queueMicrotask(() => this.dispatchEvent(new MessageEvent("office.snapshot", {
+          data: JSON.stringify(snapshot),
+        })));
+      }
+
+      close() {}
+    }
+    Object.defineProperty(window, "EventSource", { value: DeployEvents });
+  }, {
+    ...demoSnapshot, providerMode: "deploy", simulation: true, confirmedAt: new Date().toISOString(), run: null,
+  });
+  const submitted: unknown[] = [];
+  await page.route("**/api/office/tasks", async (route) => {
+    submitted.push(route.request().postDataJSON());
+    await route.fulfill({ status: 202, json: { runId: "deploy-test" } });
+  });
+
+  await page.goto("/ai-office");
+  await page.getByText("Agent workflow", { exact: true }).click();
+  await page.getByLabel("Topic").fill("Urban gardens");
+  const consent = page.getByRole("checkbox", { name: "Allow paid Deploy DeepSeek requests for this run" });
+  const submit = page.getByRole("button", { name: "Run with Deploy DeepSeek" });
+  await expect(consent).not.toBeChecked();
+  await expect(consent).toHaveJSProperty("required", true);
+  await submit.click();
+  await expect(consent).toBeFocused();
+  expect(submitted).toHaveLength(0);
+  await consent.check();
+  await submit.click();
+  await expect.poll(() => submitted).toEqual([expect.objectContaining({
+    topic: "Urban gardens", provider: "deploy", allowPaid: true,
+  })]);
+  await expect(consent).not.toBeChecked();
 });

@@ -6,7 +6,7 @@ import { AgentTaskForm, type AgentTaskInput } from "./agent-task-form";
 import type { TaskHandoff } from "../../lib/office/handoff";
 import { OfficeViewport } from "./office-viewport";
 import { demoSnapshot } from "../../lib/office/demo";
-import { latestFirst, stageProgress, totalUsage, workflow } from "../../lib/office/model";
+import { latestFirst, providerNames, stageProgress, totalUsage, workflow } from "../../lib/office/model";
 import type { Activity, Agent, AgentStatus, OfficeSnapshot } from "../../lib/office/model";
 
 import { createSseOfficeSource } from "../../lib/office/sse";
@@ -88,7 +88,7 @@ function ActivityList({ activity, names }: {
 
 function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
   const usage = totalUsage(snapshot.agents);
-  const actual = snapshot.source === "backend" && !snapshot.simulation;
+  const provider = snapshot.source === "backend" && !snapshot.simulation ? snapshot.run?.mode : undefined;
 
   return (
     <section className="office-panel office-section" aria-labelledby="usage-title">
@@ -97,12 +97,12 @@ function UsagePanel({ snapshot }: { snapshot: OfficeSnapshot }) {
       <dl className="office-usage">
         <div><dt>Requests</dt><dd>{number.format(usage.requests)}</dd></div>
         <div><dt>Tokens</dt><dd>{number.format(usage.inputTokens + usage.outputTokens)}</dd></div>
-        <div><dt>{actual ? "Estimated OpenAI cost" : "Demo estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
+        <div><dt>{provider ? `Estimated ${providerNames[provider]} cost` : "Demo estimated cost"}</dt><dd>{dollars.format(usage.estimatedCostUsd)}</dd></div>
       </dl>
       <p className="office-muted office-usage-note">
         {snapshot.source === "demo"
           ? "Demo rates per 1M tokens · $0.50 input / $1.50 output"
-          : actual ? "Includes estimates for attempts with unconfirmed usage."
+          : provider ? "Includes estimates for attempts with unconfirmed usage."
             : "The local simulation makes no model API calls."}
       </p>
     </section>
@@ -127,9 +127,10 @@ export function Office() {
   const connected = !offline && snapshot.connection === "connected";
   const run = offline ? null : snapshot.run;
   const running = run?.status === "running";
-  const paid = !offline && snapshot.providerMode === "openai";
+  const provider = offline ? "mock" : snapshot.providerMode;
   const simulated = offline || snapshot.simulation;
-  const runLabel = run?.mode === "openai" ? "OpenAI workflow" : run?.mode === "mock" ? "Mock workflow" : "Demo workflow";
+  const runProvider = run?.mode ? providerNames[run.mode] : "Demo";
+  const runLabel = `${runProvider} workflow`;
 
   async function changeRun(input?: AgentTaskInput, cancelId?: string) {
     if (!connected || starting || (!cancelId && running)) return;
@@ -167,10 +168,10 @@ export function Office() {
         <div className="office-heading-line">
           <h1>AI Office</h1>
           <div className="office-source">
-            <span className="office-demo">{offline ? "Demo data" : simulated ? "Demo simulation" : "OpenAI execution"}</span>
+            <span className="office-demo">{offline ? "Demo data" : simulated ? "Demo simulation" : `${runProvider} execution`}</span>
             <span role="status">
               {offline ? "Simulated activity · No live connection"
-                : connected ? simulated ? "Live backend · Simulated agents" : "Live backend · OpenAI agents"
+                : connected ? simulated ? "Live backend · Simulated agents" : `Live backend · ${runProvider} agents`
                   : "Disconnected · Last confirmed state"}
             </span>
           </div>
@@ -193,7 +194,7 @@ export function Office() {
         </div>
       </header>
 
-      <AgentTaskForm paid={paid} disabled={!connected || starting || running} onStart={changeRun} />
+      <AgentTaskForm key={provider} provider={provider} disabled={!connected || starting || running} onStart={changeRun} />
 
       <div className="office-grid">
         <OfficeViewport handoffs={connected ? snapshot.handoffs ?? noHandoffs : noHandoffs} agents={snapshot.agents} selectedId={selected?.id} onSelect={selectAgent} fallback={<>

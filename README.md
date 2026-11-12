@@ -98,6 +98,27 @@ The adapter uses GPT-5.4 mini through the [OpenAI Responses API](https://develop
 
 Research produces model-generated notes and flags claims that need verification. The workflow makes text requests without browsing or publishing tools. The app keeps only the current run and its outputs in memory.
 
+### Enable Deploy DeepSeek on macOS zsh
+
+The backend defaults to mock. To enable Deploy locally, create a **Secret Key** under **Service API Keys** in your Deploy organization. Use the Deploy Secret Key as the Bearer credential. Keep it in the backend shell only. Deploy Access Key IDs and credentials issued by DeepSeek's own API platform are different credentials. See the [Deploy quickstart](https://deployai.readme.io/docs/quickstart).
+
+From the repository root, with the backend virtual environment active:
+
+```zsh
+read -rs 'flow_deploy_key?Deploy Secret Key: '
+FLOW_OFFICE_PROVIDER=deploy DEPLOY_API_KEY="$flow_deploy_key" \
+  DEPLOY_BASE_URL=https://api.deploy.com/api/v1 DEPLOY_MODEL=deepseek-ai/deepseek-v4.1-flash \
+  FLOW_OFFICE_MAX_COST_USD=0.01 \
+  python -m uvicorn flow_api.app:app --app-dir backend --host 127.0.0.1 --port 8001
+unset flow_deploy_key
+```
+
+The base URL and model in the command are defaults. Use a documented Deploy regional base URL if your organization requires one. The adapter only accepts documented Deploy HTTPS endpoints and the documented `deepseek-ai/deepseek-v4.1-flash` model key. It uses `POST /chat/completions` relative to that base URL. In **AI Office → Agent workflow**, fill out a brief, check **Allow paid Deploy DeepSeek requests for this run**, then select **Run with Deploy DeepSeek**. Direct API requests must explicitly provide both `"provider": "deploy"` and `"allowPaid": true`. **Start demo task** and Media Studio continue to use local simulation. Research produces a model-generated brief without a web search tool.
+
+Deploy calls time out after 25 seconds per attempt and retry at most once after timeouts, transport failures, HTTP 429 or HTTP 5xx. Each attempt reserves an input estimate and a capped output allowance within the per-run cap, which defaults to $0.01 and accepts $0.001–$1.00. Reported prompt and completion token counts reconcile the reservation. Unknown usage, including on cancellation, retains the estimate. An accepted upstream request may still be billed after local cancellation.
+
+For this model key, Flow AI uses $0.12 per million input tokens and $0.48 per million output tokens from [Deploy's API model catalog](https://deployai.readme.io/docs/models-and-pricing), and values cached input at the full rate for budgeting. Deploy's [public pricing page](https://deploy.com/pricing) lists different rates for its 1017 listing. Check your organization's billing terms. Flow AI shows estimates based on the configured model and stops when the next reservation would exceed the cap. Actual provider billing may differ.
+
 ## Media Studio
 
 Install FFmpeg on macOS with [Homebrew](https://formulae.brew.sh/formula/ffmpeg).
