@@ -1,5 +1,8 @@
 """Media Studio API. Only project-generated media is served."""
 
+import asyncio
+import tempfile
+from pathlib import Path
 from ipaddress import ip_address
 from typing import Annotated, Literal
 
@@ -8,9 +11,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, ValidationError, model_validator
 
 from ..agents import NANODOLLARS
+from ..local_access import require_local_mutation
 from .hive_image_provider import IMAGE_COST
 from .media import MediaError
-from .store import MEDIA_TYPES
+from .store import ID, MEDIA_TYPES
+from .video_import import MAX_MP4_BYTES, verify_mp4_signature
 
 router = APIRouter(prefix="/api/studio")
 
@@ -122,6 +127,40 @@ async def action(request: Request, project_id: str):
         return project_response(request, request.app.state.studio.store.get(updated["id"]))
     except MediaError as error:
         raise HTTPException(409, str(error)) from None
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/import", status_code=202)
+async def import_clip(request: Request, project_id: str, scene_id: str, expected_export: str):
+    require_local_mutation(request)
+    if not ID.fullmatch(scene_id) or not ID.fullmatch(expected_export):
+        raise HTTPException(422, "Invalid scene or export ID.")
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "video/mp4":
+        raise HTTPException(415, "Upload a video/mp4 file.")
+    if request.headers.get("content-encoding", "identity").lower() != "identity":
+        raise HTTPException(415, "Compressed request bodies are not supported.")
+    length = request.headers.get("content-length")
+    if length and (not length.isascii() or not length.isdigit() or len(length) > 9 or int(length) > MAX_MP4_BYTES):
+        raise HTTPException(413, "The MP4 exceeds the 32 MiB limit.")
+    project_for(request, project_id)
+    studio = request.app.state.studio
+    try:
+        with tempfile.TemporaryDirectory(prefix=".upload-", dir=studio.store.directory(project_id)) as directory:
+            source = Path(directory) / "upload.mp4"
+            size = 0
+            async with asyncio.timeout(60):
+                with source.open("xb") as file:
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > MAX_MP4_BYTES:
+                            raise HTTPException(413, "The MP4 exceeds the 32 MiB limit.")
+                        file.write(chunk)
+            verify_mp4_signature(source)
+            studio.launch_clip_import(project_for(request, project_id), scene_id, expected_export, source)
+    except TimeoutError:
+        raise HTTPException(408, "The MP4 upload timed out.") from None
+    except MediaError as error:
+        raise HTTPException(409, str(error)) from None
+    return project_response(request, project_for(request, project_id))
 
 
 @router.get("/projects/{project_id}/assets/{asset_id}")

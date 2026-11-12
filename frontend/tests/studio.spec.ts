@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 
 test("produces, previews, downloads and reviews a persisted 30-second vertical mock project", async ({ page, request }) => {
   test.setTimeout(65_000);
@@ -39,6 +40,23 @@ test("produces, previews, downloads and reviews a persisted 30-second vertical m
   await page.getByLabel("Rejection feedback").fill("Review the pacing");
   await page.getByRole("button", { name: "Reject final video" }).click();
   await expect(page.getByText("Feedback · Review the pacing")).toBeVisible();
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^approved$/ })).toBeVisible();
+  const movingClip = execFileSync(process.env.FLOW_FFMPEG_BIN || "ffmpeg", [
+    "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24",
+    "-t", "1", "-c:v", "libx264", "-threads", "2", "-movflags", "frag_keyframe+empty_moov",
+    "-f", "mp4", "pipe:1",
+  ]);
+  await page.getByLabel("Import MP4 for scene 1").setInputFiles({
+    name: "motion.mp4", mimeType: "video/mp4", buffer: movingClip,
+  });
+  await expect(page.getByText("Imported MP4", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("status").filter({ hasText: /^awaiting approval$/ })).toBeVisible();
+  const [projectPath, oldDownload] = download!.split("/assets/");
+  const stale = await request.post(`${projectPath}/actions`, {
+    data: { action: "approve", reviewedAssetId: oldDownload.split("?")[0] },
+  });
+  expect(stale.status()).toBe(409);
   await page.getByRole("button", { name: "Approve final video" }).click();
   await expect(page.getByRole("status").filter({ hasText: /^approved$/ })).toBeVisible();
   await page.reload();

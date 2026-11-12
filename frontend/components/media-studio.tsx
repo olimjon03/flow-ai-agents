@@ -30,8 +30,10 @@ const displayStatus = (value: string) => value.replaceAll("_", " ");
 const assetUrl = (projectId: string, assetId: string) => `${projectsUrl}/${projectId}/assets/${assetId}`;
 
 async function request<T>(url: string, signal?: AbortSignal, payload?: object): Promise<T> {
+  const upload = payload instanceof File;
   const response = await fetch(url, payload ? {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,
+    method: "POST", headers: { "Content-Type": upload ? "video/mp4" : "application/json" },
+    body: upload ? payload : JSON.stringify(payload), signal,
   } : { signal, cache: "no-store" });
   const result = await response.json();
   if (!response.ok) throw new Error(result.detail || result.error || "Studio request failed.");
@@ -78,8 +80,9 @@ function PaidImageConsent({ checked, onChange, disabled, estimate, cap }: {
   </label>;
 }
 
-function ProjectView({ project, pending, onAction }: {
+function ProjectView({ project, pending, onAction, onImport }: {
   project: Project; pending: boolean; onAction: (action: string, extra?: object) => void;
+  onImport: (sceneId: string, exportId: string, file: File) => void;
 }) {
   const [acknowledgedHive, setAcknowledgedHive] = useState(false);
   const [paidImages, setPaidImages] = useState(false);
@@ -180,7 +183,16 @@ function ProjectView({ project, pending, onAction }: {
               <h3>Scene {scene.index + 1} · {scene.start}–{scene.start + scene.duration}s</h3>
               <p>Voiceover · {scene.narration}</p><p>Visual prompt · {scene.prompt}</p>
               {image && <img src={assetUrl(project.id, image.id)} alt={`${image.provider === "hive" ? "Hive" : "Mock"} image for scene ${scene.index + 1}`} />}
-              {video && <video controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
+              {video && <video key={video.id} controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
+              {video?.provider === "manual" && <p>Imported MP4</p>}
+              {project.finalAssetId && project.brief.aspect === "9:16" && <label>
+                Import MP4 for scene {scene.index + 1}
+                <input type="file" accept="video/mp4,.mp4" disabled={pending || working} onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  if (file && project.finalAssetId) onImport(scene.id, project.finalAssetId, file);
+                }} />
+              </label>}
             </article>;
           })}
         </div>
@@ -292,7 +304,14 @@ export function Studio() {
           ))}</ul>
         </aside>
         {project && project.id === id && <ProjectView key={project.id} project={project} pending={pending}
-          onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })} />}
+          onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })}
+          onImport={(sceneId, exportId, file) => {
+            if (file.size > 32 * 1024 * 1024) {
+              setError("The MP4 exceeds the 32 MiB limit.");
+              return;
+            }
+            void mutate(`${projectsUrl}/${project.id}/scenes/${sceneId}/import?expected_export=${exportId}`, file);
+          }} />}
       </div>
     </div>
   );

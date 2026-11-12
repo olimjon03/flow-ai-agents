@@ -12,6 +12,7 @@ from ..agents import AgentError, AgentTask, Budget, MockProvider, NANODOLLARS, S
 from ..deploy_provider import attempt_cost
 from ..orchestrator import AGENTS, now
 from .hive_image_provider import IMAGE_COST, HiveImageRejected
+from .video_import import ManualVideoProvider
 from .storyboard import deepseek_scenes, scene_record
 from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, VideoProvider, publish_image, write_audio
 
@@ -66,6 +67,7 @@ class Studio:
         self.voice = MockVoice()
         self.ffmpeg = ffmpeg or FFmpeg()
         self.video = video if video is not None else self.ffmpeg
+        self.manual_video = ManualVideoProvider(self.ffmpeg)
         self.active = None
         self.worker = None
         self.replacement = None
@@ -185,7 +187,7 @@ class Studio:
         self.save(project)
         self.office.publish()
 
-    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset(), daily=False):
+    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset(), daily=False, clip_import=None):
         if self.busy():
             raise MediaError("An Office workflow is already running.")
         project.update(status="working", error=None, approval="pending", feedback=None, approvedAssetId=None)
@@ -200,7 +202,7 @@ class Studio:
                 desk = DESKS[stage]
                 self.office.agents[desk] = replace(self.office.agents[desk], task=f"Media Studio · {stage}")
                 self.update(project, stage, "queued", 0, f"{stage.capitalize()} queued")
-        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images, daily=daily))
+        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images, daily=daily, clip_import=clip_import))
         if self.replacement:
             self.worker.add_done_callback(lambda _: self.finish_replacement(project))
         return project
@@ -343,7 +345,7 @@ class Studio:
         self.office.publish()
         return True
 
-    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images, *, daily=False):
+    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images, *, daily=False, clip_import=None):
         try:
             if "storyboard" in stages and not paid_storyboard:
                 await self.plan(project)
@@ -363,7 +365,12 @@ class Studio:
                         else:
                             await self.run_stage(project, "image", self.images)
                     if "video" in stages:
-                        await self.run_stage(project, "video", self.clips)
+                        if clip_import:
+                            async def import_scene(current):
+                                await self.import_scene(current, *clip_import)
+                            await self.run_stage(project, "video", import_scene)
+                        else:
+                            await self.run_stage(project, "video", self.clips)
 
                 async with asyncio.TaskGroup() as group:
                     group.create_task(visuals())
@@ -556,6 +563,42 @@ class Studio:
     def resolution(self, project):
         width, height = (360, 640) if project["brief"]["resolution"] == "test" else (1080, 1920)
         return (width, height) if project["brief"]["aspect"] == "9:16" else (height, width)
+
+    def launch_clip_import(self, project, scene_id, expected_export, upload):
+        if self.busy() or project["status"] == "working":
+            raise MediaError("Wait for the active workflow before importing a clip.")
+        if (project["brief"]["aspect"] != "9:16" or not expected_export
+            or project["finalAssetId"] != expected_export or not self.store.asset(project, expected_export)):
+            raise MediaError("Open the current vertical export before importing a clip.")
+        scene = next((item for item in project["scenes"] if item["id"] == scene_id), None)
+        if not scene:
+            raise MediaError("The scene is no longer part of this export.")
+        for item in project["scenes"]:
+            if item["id"] != scene_id:
+                self.require_asset(project, ".mp4", "video", item["id"])
+        self.require_asset(project, ".wav", "voice")
+        self.require_asset(project, ".srt", "voice")
+        self.begin_replacement(project)
+        source = self.store.batch_directory(project["id"], self.replacement.id) / "input.mp4"
+        try:
+            upload.replace(source)
+        except OSError:
+            project.update(status="failed", error="Could not stage the uploaded clip.")
+            self.finish_replacement(project)
+            raise MediaError("Could not stage the uploaded clip.") from None
+        self.reset(project, ("editor",))
+        project["assets"] = [asset for asset in project["assets"]
+                             if not (asset["stage"] == "video" and asset["sceneId"] == scene_id)]
+        return self.launch(project, ("video", "editor"), clip_import=(scene, source))
+
+    async def import_scene(self, project, scene, source):
+        width, height = self.resolution(project)
+        try:
+            await self.generate_asset(project, "video", ".mp4", "Imported scene clip",
+                                      lambda path: self.manual_video.generate(source, path, scene["duration"], (width, height)),
+                                      scene["id"], width=width, height=height, duration=scene["duration"], provider="manual")
+        finally:
+            source.unlink(missing_ok=True)
 
     async def clips(self, project):
         size = self.resolution(project)

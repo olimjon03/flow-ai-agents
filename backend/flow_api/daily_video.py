@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-import re
 from contextlib import closing, suppress
 from datetime import datetime, time, timedelta, timezone
-from ipaddress import ip_address
 from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -13,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, RootModel, StrictBool, StringConstraints, field_validator
 
+from .local_access import require_local_mutation
 from .studio.media import MediaError
 from .studio.routes import Brief, read_model
 
@@ -22,7 +21,8 @@ router = APIRouter(prefix="/api/daily-video")
 # These descriptors are inert. No browser profile is created or opened.
 MOCK_PROFILES = tuple({
     "id": f"mock-chrome-{number}", "name": f"Mock Chrome profile {number}",
-    "userDataDirectory": f"mock-profiles/chrome-{number}",
+    "userDataDirectory": f"mock-profiles/chrome-{number}/data",
+    "downloadDirectory": f"mock-profiles/chrome-{number}/downloads",
 } for number in range(1, 5))
 
 
@@ -253,33 +253,6 @@ async def settings(request: Request):
     return request.app.state.daily_video.snapshot()
 
 
-LOCAL_AUTHORITY = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?", re.IGNORECASE | re.ASCII)
-
-
-def require_local_mutation(request: Request):
-    try:
-        peer = ip_address(request.client.host if request.client else "")
-        peer = getattr(peer, "ipv4_mapped", None) or peer
-        loopback = peer.is_loopback
-    except ValueError:
-        loopback = False
-    hosts = request.headers.getlist("host")
-    authority = LOCAL_AUTHORITY.fullmatch(hosts[0]) if len(hosts) == 1 else None
-    if not loopback or not authority or (authority[1] and not 1 <= int(authority[1]) <= 65535):
-        raise HTTPException(403, "Daily Video settings may only be changed on localhost.")
-    if any(header in request.headers for header in (
-        "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip",
-    )):
-        raise HTTPException(403, "Forwarded Daily Video mutations are not supported.")
-    origins = request.headers.getlist("origin")
-    scheme = request.scope["scheme"]
-    host = hosts[0].lower()
-    default_port = "80" if scheme == "http" else "443"
-    if authority[1] == default_port:
-        host = host.removesuffix(f":{default_port}")
-    expected = f"{scheme}://{host}"
-    if origins and (len(origins) != 1 or origins[0].lower() != expected):
-        raise HTTPException(403, "Cross-origin Daily Video mutations are not supported.")
 
 
 @router.post("")
