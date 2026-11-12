@@ -122,7 +122,9 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ProjectStore(self.root).get(project["id"])["feedback"], "Revise the export.")
         original_images = {asset["id"] for asset in project["assets"] if asset["stage"] == "image"}
         self.studio.action(project, "regenerate", "editor", None)
+        self.assertTrue(final.exists())
         await asyncio.wait_for(self.studio.worker, 20)
+        self.assertEqual(project["status"], "awaiting_approval", project["error"])
         self.assertFalse(final.exists())
         self.assertEqual({asset["id"] for asset in project["assets"] if asset["stage"] == "image"}, original_images)
         self.studio.action(project, "approve", None, None)

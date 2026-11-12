@@ -30,6 +30,13 @@ async function forward(request: Request, context: Context) {
     }
     const input = await readJsonBody(request, 4096);
     if (input instanceof Response) return input;
+    if ((input as { allowPaidImages?: unknown } | null)?.allowPaidImages === true) {
+      const local = (value: string) => ["127.0.0.1", "localhost", "[::1]", "::1"].includes(value);
+      const forwarded = request.headers.get("x-forwarded-for");
+      if (!local(url.hostname) || (forwarded && !forwarded.split(",").every((ip) => local(ip.trim())))) {
+        return errorResponse("Paid Hive images are only available on localhost.", 403);
+      }
+    }
     headers.set("Content-Type", "application/json");
     body = JSON.stringify(input);
   }

@@ -2,12 +2,16 @@
 
 import asyncio
 import re
-from dataclasses import replace
+import shutil
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from typing import BinaryIO
 from uuid import uuid4
 
 from ..agents import AgentError, AgentTask, Budget, MockProvider, NANODOLLARS, STEPS
+from ..deploy_provider import attempt_cost
 from ..orchestrator import AGENTS, now
-from .hive_image_provider import IMAGE_COST
+from .hive_image_provider import IMAGE_COST, HiveImageRejected
 from .storyboard import deepseek_scenes, scene_record
 from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, publish_image, write_audio
 
@@ -38,6 +42,19 @@ def mock_script_cues(script, timestamps):
     return match
 
 
+@dataclass
+class Replacement:
+    project: dict
+    previous: dict
+    id: str
+    lease: BinaryIO
+
+
+ACTIVE_MEDIA = ("assets", "finalAssetId", "approval", "feedback")
+ACTIVE_PLAN = ("script", "review", "scenes", "scriptApproved")
+STORYBOARD_OUTPUT_LIMIT = 1800
+
+
 class Studio:
     def __init__(self, store, office, ffmpeg=None, *, image: ImageProvider | None = None,
                  hive_image: ImageProvider | None = None, image_cap=0):
@@ -51,16 +68,85 @@ class Studio:
         self.video = self.ffmpeg
         self.active = None
         self.worker = None
+        self.replacement = None
         for project in store.list():
+            if not store.recover_batches(project):
+                continue
             if project["status"] == "working":
                 project["status"] = "failed"
                 project["error"] = "The service restarted during production. Regenerate a stage to continue."
-                self.cancel_stages(project)
-                self.save(project)
+                original_stages = project.pop("replacementStages", None)
+                if original_stages is not None:
+                    project["stages"] = original_stages
+                else:
+                    self.cancel_stages(project)
+                job_id = project.pop("replacementJob", None)
+                if job_id:
+                    store.save_replacement(project, job_id)
+                else:
+                    self.save(project)
 
     def save(self, project):
         project["updatedAt"] = now()
-        self.store.save(project)
+        job = self.replacement
+        if job and job.project is project:
+            visible = {**project, **{key: job.previous[key] for key in (*ACTIVE_MEDIA, *ACTIVE_PLAN)},
+                       "replacementJob": job.id, "replacementStages": job.previous["stages"]}
+            self.store.save_replacement(visible, job.id)
+        else:
+            self.store.save(project)
+
+    def begin_replacement(self, project):
+        if (self.worker and not self.worker.done()) or (self.office.run and self.office.run["status"] == "running"):
+            raise MediaError("An Office workflow is already running.")
+        job_id = uuid4().hex
+        lease = self.store.stage(project["id"], job_id)
+        try:
+            self.store.claim_replacement(project, job_id)
+        except BaseException as error:
+            lease.close()
+            shutil.rmtree(self.store.batch_directory(project["id"], job_id), ignore_errors=True)
+            if isinstance(error, RuntimeError):
+                raise MediaError(str(error)) from None
+            raise
+        self.replacement = Replacement(project, deepcopy(project), job_id, lease)
+
+    def finish_replacement(self, project):
+        job = self.replacement
+        if not job or job.project is not project:
+            return
+        committed = False
+        try:
+            success = project["status"] == "awaiting_approval" and self.active is project
+            if success:
+                final = self.store.asset(project, project["finalAssetId"])
+                if not final or final[1].get("batch") != job.id or not final[0].stat().st_size:
+                    project.update(status="failed", error="The replacement export is missing.")
+                    self.office.run.update(status="failed", error=project["error"])
+                    success = False
+            if not success:
+                if project["status"] == "working":
+                    project.update(status="cancelled", error="Replacement cancelled.")
+                fields = ACTIVE_MEDIA if project["status"] == "awaiting_script_approval" else (*ACTIVE_MEDIA, *ACTIVE_PLAN, "stages")
+                project.update({key: job.previous[key] for key in fields})
+            project.pop("replacementJob", None)
+            self.store.save_replacement(project, job.id)
+            committed = success
+            if committed:
+                active_ids = {asset["id"] for asset in project["assets"]}
+                self.delete_assets(project, (asset for asset in job.previous["assets"] if asset["id"] not in active_ids))
+        finally:
+            self.replacement = None
+            job.lease.close()
+            if not committed:
+                shutil.rmtree(self.store.batch_directory(project["id"], job.id), ignore_errors=True)
+
+    def delete_assets(self, project, assets):
+        for asset in assets:
+            try:
+                self.store.path(project["id"], asset["id"], asset["extension"], asset.get("batch")).unlink(missing_ok=True)
+            except (ValueError, OSError):
+                pass
 
     def create(self, brief):
         project = {
@@ -104,6 +190,8 @@ class Studio:
                 self.office.agents[desk] = replace(self.office.agents[desk], task=f"Media Studio · {stage}")
                 self.update(project, stage, "queued", 0, f"{stage.capitalize()} queued")
         self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images))
+        if self.replacement:
+            self.worker.add_done_callback(lambda _: self.finish_replacement(project))
         return project
 
     def reset(self, project, stages, keep_images=frozenset()):
@@ -121,13 +209,13 @@ class Studio:
         return removed
 
     def regenerate(self, project, reset_stages, run_stages, *, paid_images=False, keep_images=frozenset()):
+        replacing = bool(project["finalAssetId"])
+        if replacing:
+            self.begin_replacement(project)
         removed = self.reset(project, reset_stages, keep_images)
         self.launch(project, run_stages, paid_images=paid_images, keep_images=keep_images)
-        for asset in removed:
-            try:
-                self.store.path(project["id"], asset["id"], asset["extension"]).unlink(missing_ok=True)
-            except (ValueError, OSError):
-                pass
+        if not replacing:
+            self.delete_assets(project, removed)
         return project
 
     def image_quote(self, project, count=None):
@@ -136,6 +224,12 @@ class Studio:
         return {
             "estimatedCostUsd": (len(project["scenes"]) if count is None else count) * IMAGE_COST / NANODOLLARS,
             "unitCostUsd": IMAGE_COST / NANODOLLARS,
+            "combinedMaxEstimateUsd": (
+                (5 * IMAGE_COST + self.storyboard_reservation(project)) / NANODOLLARS
+                if self.office.provider.mode == "deploy" and project["brief"]["durationSeconds"] == 30
+                and project["script"] else None
+            ),
+            "officeCapUsd": self.office.max_cost / NANODOLLARS,
             "maxCostUsd": min(self.image_cap, self.office.max_cost) / NANODOLLARS,
         }
 
@@ -154,7 +248,10 @@ class Studio:
             and asset["sceneId"] in scene_ids and self.store.asset(project, asset["id"])
         )
 
-    def action(self, project, action, stage, feedback, allow_paid=False, allow_paid_images=False):
+    def action(self, project, action, stage, feedback, allow_paid=False, allow_paid_images=False,
+               acknowledge_uncertain=False):
+        if allow_paid_images and project.get("hiveUncertain") and not acknowledge_uncertain:
+            raise MediaError("A previous Hive attempt may have been billed. Acknowledge it before resubmitting.")
         if action == "cancel":
             if not self.cancel(project["id"]):
                 raise MediaError("This project has no active job.")
@@ -168,9 +265,14 @@ class Studio:
         if action == "approve-script" and can_approve:
             if allow_paid_images:
                 self.check_paid_images(project, 5 if allow_paid else len(project["scenes"]))
+            if allow_paid and (self.office.provider.mode != "deploy" or project["brief"]["durationSeconds"] != 30):
+                raise MediaError("Deploy storyboard generation requires Deploy mode and a 30-second project.")
+            if allow_paid and allow_paid_images and 5 * IMAGE_COST + self.storyboard_reservation(project) > self.office.max_cost:
+                raise MediaError("The combined storyboard and image reservations exceed the Office run budget.")
+            if project["finalAssetId"]:
+                self.begin_replacement(project)
+                self.reset(project, MEDIA)
             if allow_paid:
-                if self.office.provider.mode != "deploy" or project["brief"]["durationSeconds"] != 30:
-                    raise MediaError("Deploy storyboard generation requires Deploy mode and a 30-second project.")
                 return self.launch(project, ("storyboard", *MEDIA), paid_storyboard=True, paid_images=allow_paid_images)
             project["scriptApproved"] = True
             self.launch(project, MEDIA, paid_images=allow_paid_images)
@@ -228,6 +330,8 @@ class Studio:
         try:
             if "storyboard" in stages and not paid_storyboard:
                 await self.plan(project)
+                if project["status"] != "working":
+                    return
                 project["status"] = "awaiting_script_approval"
             else:
                 if paid_storyboard:
@@ -249,6 +353,8 @@ class Studio:
                         group.create_task(self.run_stage(project, "voice", self.narration))
                 if "editor" in stages:
                     await self.run_stage(project, "editor", self.export)
+                if project["status"] != "working":
+                    return
                 project["status"] = "awaiting_approval"
             self.office.run["status"] = "completed"
         except asyncio.CancelledError:
@@ -261,7 +367,10 @@ class Studio:
                     self.update(project, stage, "cancelled", state["progress"], "Skipped after production failure")
             self.office.run.update(status="failed", error=project["error"])
         finally:
-            self.save(project)
+            if self.replacement and self.replacement.project is project:
+                self.finish_replacement(project)
+            else:
+                self.save(project)
             self.office.publish()
 
     async def run_stage(self, project, stage, operation):
@@ -315,9 +424,9 @@ class Studio:
             for index, (label, narration) in enumerate(zip(labels, lines, strict=True))
         ]
 
-    async def deploy_storyboard(self, project):
+    def storyboard_prompt(self, project):
         brief = project["brief"]
-        prompt = (
+        return (
             "Adapt the approved script below into exactly five consecutive 6-second scenes. "
             "Preserve the meaning and sequence; do not add claims. Treat the script as source material. "
             "Return only a JSON object with a scenes array. Each scene must contain order (1–5), "
@@ -326,8 +435,14 @@ class Studio:
             f"Use {brief['language']} for voiceover, {brief['style']} style, and {brief['aspect']} framing. "
             "Write each field on one line.\n\nApproved script:\n" + project["script"]
         )
+    def storyboard_reservation(self, project):
+        return (getattr(self.office.provider, "retries", 1) + 1) * attempt_cost(
+            self.storyboard_prompt(project), STORYBOARD_OUTPUT_LIMIT,
+        )
+
+    async def deploy_storyboard(self, project):
         result = await self.office.provider.complete(
-            DESKS["storyboard"], prompt, 1800, self.office.budget,
+            DESKS["storyboard"], self.storyboard_prompt(project), STORYBOARD_OUTPUT_LIMIT, self.office.budget,
             lambda message: self.update(project, "storyboard", "working", 1, f"{message} Retrying."),
         )
         project["scenes"] = deepseek_scenes(result)
@@ -335,7 +450,8 @@ class Studio:
 
     async def generate_asset(self, project, stage, extension, label, operation, scene_id=None, **metadata):
         asset_id = uuid4().hex
-        path = self.store.path(project["id"], asset_id, extension)
+        batch = self.replacement.id if self.replacement and self.replacement.project is project else None
+        path = self.store.path(project["id"], asset_id, extension, batch)
         asset = {"id": asset_id, "stage": stage, "extension": extension, "label": label, "sceneId": scene_id}
         try:
             generated = await operation(path)
@@ -344,6 +460,8 @@ class Studio:
             asset.update(bytes=path.stat().st_size, **metadata)
             if generated is not None:
                 asset.update(generated)
+            if batch:
+                asset["batch"] = batch
             project["assets"].append(asset)
             try:
                 self.save(project)
@@ -376,11 +494,18 @@ class Studio:
             if paid:
                 self.office.budget.reserve_amount(DESKS["image"], IMAGE_COST)
                 project["imageAttempts"] = project.get("imageAttempts", 0) + 1
+                project["hiveUncertain"] = True
                 self.save(project)
                 self.office.publish()
             request = ImageRequest(scene["prompt"], scene["index"], width, height)
-            await self.generate_asset(project, "image", ".png", "Scene image",
-                                      lambda path: publish_image(provider, request, path), scene["id"])
+            try:
+                await self.generate_asset(project, "image", ".png", "Scene image",
+                                          lambda path: publish_image(provider, request, path), scene["id"])
+            except HiveImageRejected:
+                project["hiveUncertain"] = False
+                raise
+            if paid:
+                project["hiveUncertain"] = False
             self.update(project, "image", "working", (scene["index"] + 1) * 90 // len(project["scenes"]), "Scene image ready")
 
     async def narration(self, project):
@@ -433,7 +558,7 @@ class Studio:
             async def background_tone(path):
                 write_audio(path, duration, 110)
             asset_id = await self.generate_asset(project, "editor", ".wav", "Original background tone", background_tone)
-            background = self.store.path(project["id"], asset_id, ".wav")
+            background, _ = self.store.asset(project, asset_id)
         width, height = self.resolution(project)
         project["finalAssetId"] = await self.generate_asset(
             project, "editor", ".mp4", "Final MP4",

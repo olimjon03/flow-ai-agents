@@ -13,6 +13,7 @@ from flow_api.agents import budget_limit
 from flow_api.app import create_app
 from flow_api.studio.hive_image_provider import ENDPOINT, HiveImageProvider
 from flow_api.studio.media import ImageRequest, MediaError
+from flow_api.studio.workflow import Studio
 
 DOWNLOAD = "https://cdn.thehive.ai/image.png?signature=private"
 REQUEST = ImageRequest("A garden in the city", 0, 360, 640)
@@ -58,7 +59,10 @@ class HiveAdapterTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(503) if len(calls) == 2 else downloaded()
 
         provider = await self.provider(upstream)
-        self.assertEqual((await provider.generate(REQUEST, self.path)).provider, "hive")
+        with self.assertLogs("httpx", level="INFO") as logs:
+            self.assertEqual((await provider.generate(REQUEST, self.path)).provider, "hive")
+        self.assertNotIn("signature=private", "\n".join(logs.output))
+        self.assertNotIn("server-secret", "\n".join(logs.output))
         self.assertEqual(calls, ["POST", "GET", "GET"])
         self.assertEqual(self.path.read_bytes(), png())
 
@@ -131,11 +135,11 @@ class HiveStudioTests(unittest.IsolatedAsyncioTestCase):
         self.block_at = None
         self.started = asyncio.Event()
         root = self.enterContext(tempfile.TemporaryDirectory())
-        app = create_app(media_root=root)
+        app = self.app = create_app(media_root=root)
         # Inject only a mock HTTP transport while exercising normal startup configuration.
         original_client = httpx.AsyncClient
         self.api = await self.enterAsyncContext(original_client(
-            base_url="http://test", transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1", transport=httpx.ASGITransport(app=app),
         ))
         with patch.dict("os.environ", {
             "FLOW_STUDIO_IMAGE_PROVIDER": "hive", "HIVE_API_KEY": "server-secret",
@@ -240,6 +244,107 @@ class HiveStudioTests(unittest.IsolatedAsyncioTestCase):
         cancelled = (await self.api.get(self.path)).json()
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertEqual(cancelled["estimatedImageSpendUsd"], 0.006)
+        self.assertTrue(cancelled["hiveUncertain"])
+        self.assertEqual((await self.action("regenerate", stage="image", allowPaidImages=True)).status_code, 409)
         self.assertEqual(len(cancelled["assets"]), 1)
         self.assertEqual(len(self.prompts), 2)
         self.assertEqual(list(self.studio.store.directory(cancelled["id"]).glob(".image-*")), [])
+
+    async def seed_approved_export(self):
+        async def clips(project):
+            async def write(path):
+                path.write_bytes(b"replacement clip")
+            for scene in project["scenes"]:
+                self.studio.require_asset(project, ".png", "image", scene["id"])
+                await self.studio.generate_asset(project, "video", ".mp4", "Clip", write, scene["id"])
+
+        async def export(project):
+            async def write(path):
+                path.write_bytes(b"complete export")
+            for scene in project["scenes"]:
+                self.studio.require_asset(project, ".mp4", "video", scene["id"])
+            project["finalAssetId"] = await self.studio.generate_asset(project, "editor", ".mp4", "Export", write)
+
+        self.studio.clips, self.studio.export = clips, export
+        self.assertEqual((await self.action("approve-script")).status_code, 200)
+        await self.finish()
+        self.assertEqual((await self.action("approve")).status_code, 200)
+        return (await self.api.get(self.path)).json()
+
+    def assert_preserved(self, before, current):
+        self.assertEqual(current["assets"], before["assets"])
+        self.assertEqual(current["finalAssetId"], before["finalAssetId"])
+        self.assertEqual(current["approval"], "approved")
+        for asset in before["assets"]:
+            self.assertIsNotNone(self.studio.store.asset(current, asset["id"]))
+
+    async def test_failed_first_and_later_replacement_scenes_preserve_approved_media(self):
+        before = await self.seed_approved_export()
+        for offset in (1, 2):
+            self.fail_at = len(self.prompts) + offset
+            with self.subTest(scene=offset):
+                response = await self.action("regenerate", stage="image", allowPaidImages=True)
+                self.assertEqual(response.status_code, 200)
+                self.assert_preserved(before, response.json())
+                failed = await self.finish()
+                self.assertEqual(failed["status"], "failed")
+                self.assert_preserved(before, failed)
+                self.assertFalse(list(self.studio.store.directory(before["id"]).glob(".replacement-*")))
+
+    async def test_cancellation_and_acknowledged_replacement_switch_references_only_on_success(self):
+        before = await self.seed_approved_export()
+        self.block_at = 2
+        self.assertEqual((await self.action("regenerate", stage="image", allowPaidImages=True)).status_code, 200)
+        await asyncio.wait_for(self.started.wait(), 3)
+        self.assert_preserved(before, (await self.api.get(self.path)).json())
+        self.assertEqual((await self.action("cancel")).status_code, 200)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.studio.worker
+        cancelled = (await self.api.get(self.path)).json()
+        self.assert_preserved(before, cancelled)
+        self.assertTrue(cancelled["hiveUncertain"])
+        self.assertEqual((await self.action("regenerate", stage="image", allowPaidImages=True)).status_code, 409)
+        self.assertEqual((await self.action("regenerate", stage="image", allowPaidImages=True,
+                                           acknowledgeUncertainHive=True)).status_code, 200)
+        finished = await self.finish()
+        self.assertEqual(finished["status"], "awaiting_approval")
+        self.assertNotEqual(finished["finalAssetId"], before["finalAssetId"])
+        self.assertFalse(finished["hiveUncertain"])
+        self.assertIsNotNone(self.studio.store.asset(finished, finished["finalAssetId"]))
+        self.assertIsNone(self.studio.store.asset(finished, before["finalAssetId"]))
+
+    async def test_restart_cleans_orphan_stage_and_preserves_approved_media(self):
+        before = await self.seed_approved_export()
+        stored = self.studio.store.get(before["id"])
+        job = "a" * 32
+        with self.studio.store.stage(before["id"], job):
+            self.studio.store.claim_replacement(stored, job)
+            directory = self.studio.store.batch_directory(before["id"], job)
+            (directory / "stale.png").write_bytes(b"partial")
+            Studio(self.studio.store, self.studio.office)
+            self.assertTrue(directory.exists(), "A competing instance must leave a leased batch alone")
+        Studio(self.studio.store, self.studio.office)
+        recovered = self.studio.store.get(before["id"])
+        self.assertEqual(recovered["status"], "failed")
+        self.assert_preserved(before, recovered)
+        self.assertFalse(directory.exists())
+        with self.assertRaisesRegex(RuntimeError, "no longer current"):
+            self.studio.store.save_replacement(stored, job)
+
+    async def test_combined_preflight_and_remote_hive_consent_block_before_calls(self):
+        class Deploy:
+            mode = "deploy"
+            async def complete(self, *_):
+                raise AssertionError("Combined run must be rejected before calling Deploy")
+
+        self.studio.office.provider = Deploy()
+        self.studio.office.max_cost = budget_limit("0.015")
+        result = await self.action("approve-script", allowPaid=True, allowPaidImages=True)
+        self.assertEqual(result.status_code, 409)
+        self.assertIn("combined", result.json()["detail"])
+        async with httpx.AsyncClient(base_url="http://127.0.0.1", transport=httpx.ASGITransport(
+            app=self.app, client=("192.0.2.10", 12345),
+        )) as remote:
+            result = await remote.post(self.path + "/actions", json={"action": "approve-script", "allowPaidImages": True})
+        self.assertEqual(result.status_code, 403)
+        self.assertEqual(self.prompts, [])

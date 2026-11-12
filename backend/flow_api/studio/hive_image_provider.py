@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -14,12 +16,31 @@ IMAGE_COST = 3_000_000  # $0.003 in nanodollars, based on the published four-ste
 DOWNLOAD_HOSTS = frozenset({"cdn.thehive.ai", "hive-data-prod-cdn.thehive.ai"})
 
 
+class HiveImageRejected(MediaError):
+    """Hive definitively rejected the request before producing an image."""
+
+
+class RedactHiveURL(logging.Filter):
+    pattern = re.compile(r'(https://(?:cdn|hive-data-prod-cdn)\.thehive\.ai(?::443)?/[^?\s"<>]*)\?[^\s"<>]*', re.I)
+
+    def filter(self, record):
+        message = record.getMessage()
+        redacted = self.pattern.sub(r"\1?[redacted]", message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+redact_hive_url = RedactHiveURL()
+
+
 class RetryDownload(Exception):
     pass
 
 
 class HiveImageProvider:
     def __init__(self, client: httpx.AsyncClient, key: str, *, generation_timeout=45, download_timeout=15):
+        logging.getLogger("httpx").addFilter(redact_hive_url)
         self.client = client
         self.key = key
         self.generation_timeout = generation_timeout
@@ -36,7 +57,7 @@ class HiveImageProvider:
                     "Authorization": f"Bearer {self.key}", "Accept-Encoding": "identity",
                 }, follow_redirects=False) as response:
                     if response.status_code == 451:
-                        raise MediaError("Hive blocked this image through moderation.")
+                        raise HiveImageRejected("Hive blocked this image through moderation.")
                     if not response.is_success:
                         raise MediaError(f"Hive image generation failed (HTTP {response.status_code}).")
                     if response.headers.get("content-encoding", "identity").lower() != "identity":

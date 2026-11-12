@@ -19,3 +19,11 @@ Flow AI uses a conservative per-attempt estimate of $0.003 for one four-step ima
 The adapter uses a 45-second generation deadline and 15 seconds per download attempt. It never automatically repeats a generation POST. One transient download retry uses the same URL. Downloads require an allowlisted HTTPS host and are limited to 16 MiB, followed by PNG decoding and pixel limits. Redirects are rejected. Avoid verbose HTTP client logging of signed download URLs.
 
 Unverified account-specific details include Hive V3 entitlement, acceptance of the requested 576×1024 size, actual billing, any additional result CDN hosts, and idempotency or status lookup support. The current public pricing page redirects to Deploy and does not confirm the legacy Flux rate. No live or paid requests were made. See the [Hive V3 image contract](https://docs.thehive.ai/docs/image-generation-models) and [public pricing](https://deploy.com/pricing).
+
+### PR #11 review follow-up
+
+Replacement work for a project with an existing export writes to a leased project-local staging directory. Active asset references change in one SQLite update after successful export. On failure, cancellation or restart the previous export stays available. Startup removes unreferenced batches whose leases have been released. Run Studio as a single local service with one worker.
+
+Before combined DeepSeek and Hive approval, the estimate includes the maximum configured Deploy attempts and five Hive images. Each request still reserves against the live Office budget. An uncertain Hive attempt remains visible after cancellation or restart and requires a separate acknowledgement before another paid image submission. HTTPX request logging redacts Hive CDN query strings.
+
+Run both FastAPI and the Next.js dashboard bound to loopback. Do not publish or reverse-proxy the paid Studio routes until caller authentication is available. The localhost checks are scoped to this development setup. Hive entitlement, portrait dimensions, CDN coverage, actual billing, and idempotency remain unverified.

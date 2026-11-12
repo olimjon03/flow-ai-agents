@@ -180,13 +180,19 @@ class FFmpeg:
         )
 
     async def export(self, clips, scene_durations, audio, subtitles, output, duration, background=None):
-        # Asset filenames are validated hex IDs and all paths are in one project directory.
+        # FFmpeg safe concat needs project-generated names in the manifest directory.
         manifest = output.with_suffix(".txt")
-        manifest.write_text("".join(
-            f"file '{clip.name}'\noutpoint {seconds}\n"
-            for clip, seconds in zip(clips, scene_durations, strict=True)
-        ))
+        links = []
         try:
+            for clip in clips:
+                if clip.parent != output.parent:
+                    link = output.parent / clip.name
+                    os.link(clip, link)
+                    links.append(link)
+            manifest.write_text("".join(
+                f"file '{clip.name}'\noutpoint {seconds}\n"
+                for clip, seconds in zip(clips, scene_durations, strict=True)
+            ))
             inputs = ["-f", "concat", "-safe", "1", "-i", manifest, "-i", audio, "-i", subtitles]
             audio_map = ["-map", "1:a:0"]
             if background:
@@ -199,3 +205,5 @@ class FFmpeg:
             )
         finally:
             manifest.unlink(missing_ok=True)
+            for link in links:
+                link.unlink(missing_ok=True)

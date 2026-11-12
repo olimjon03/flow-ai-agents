@@ -1,8 +1,10 @@
 """SQLite metadata and a project-scoped media directory."""
 
+import fcntl
 import json
 import re
 import sqlite3
+import shutil
 from contextlib import closing
 from pathlib import Path
 
@@ -34,6 +36,71 @@ class ProjectStore:
                 (project["id"], project["createdAt"], json.dumps(project, ensure_ascii=False)),
             )
 
+    def claim_replacement(self, project, job_id):
+        with closing(self.connect()) as db, db:
+            cursor = db.execute(
+                "UPDATE projects SET data=? WHERE id=? AND json_extract(data, '$.replacementJob') IS NULL "
+                "AND json_extract(data, '$.status') != 'working' AND json_extract(data, '$.updatedAt')=?",
+                (json.dumps({**project, "replacementJob": job_id, "replacementStages": project["stages"],
+                             "status": "working"}, ensure_ascii=False), project["id"], project["updatedAt"]),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("The project already has an active job.")
+
+    def save_replacement(self, project, job_id):
+        with closing(self.connect()) as db, db:
+            cursor = db.execute(
+                "UPDATE projects SET data=? WHERE id=? AND json_extract(data, '$.replacementJob')=?",
+                (json.dumps(project, ensure_ascii=False), project["id"], job_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("The replacement job is no longer current.")
+
+    def batch_directory(self, project_id, batch):
+        if not ID.fullmatch(batch):
+            raise ValueError("Invalid replacement ID.")
+        directory = self.directory(project_id) / (".replacement-" + batch)
+        if directory.resolve() != directory:
+            raise ValueError("Unsafe replacement directory.")
+        return directory
+
+    def stage(self, project_id, batch):
+        directory = self.batch_directory(project_id, batch)
+        directory.mkdir(mode=0o700)
+        lock = (directory / ".lease").open("xb")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            lock.close()
+            raise
+        return lock
+
+    def recover_batches(self, project):
+        directory = self.directory(project["id"])
+        referenced = {asset.get("batch") for asset in project["assets"]}
+        for candidate in directory.glob(".replacement-*"):
+            batch = candidate.name.removeprefix(".replacement-")
+            if not ID.fullmatch(batch) or batch in referenced or candidate.is_symlink() or not candidate.is_dir():
+                continue
+            lease = candidate / ".lease"
+            if lease.is_symlink() or not lease.is_file():
+                continue
+            try:
+                lock_file = lease.open("rb")
+            except FileNotFoundError:
+                continue
+            with lock_file as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    if batch == project.get("replacementJob"):
+                        return False
+                    continue
+                current = self.get(project["id"])
+                if current and not any(asset.get("batch") == batch for asset in current["assets"]):
+                    shutil.rmtree(candidate)
+        return True
+
     def get(self, project_id):
         if not ID.fullmatch(project_id):
             return None
@@ -54,10 +121,11 @@ class ProjectStore:
         directory.mkdir(exist_ok=True)
         return directory
 
-    def path(self, project_id, asset_id, extension):
+    def path(self, project_id, asset_id, extension, batch=None):
         if not ID.fullmatch(asset_id) or extension not in MEDIA_TYPES:
             raise ValueError("Invalid media asset.")
-        candidate = self.directory(project_id) / (asset_id + extension)
+        directory = self.batch_directory(project_id, batch) if batch else self.directory(project_id)
+        candidate = directory / (asset_id + extension)
         if candidate.resolve() != candidate:
             raise ValueError("Unsafe media path.")
         return candidate
@@ -66,5 +134,5 @@ class ProjectStore:
         metadata = next((asset for asset in project["assets"] if asset["id"] == asset_id), None)
         if not metadata:
             return None
-        path = self.path(project["id"], asset_id, metadata["extension"])
+        path = self.path(project["id"], asset_id, metadata["extension"], metadata.get("batch"))
         return (path, metadata) if path.is_file() else None

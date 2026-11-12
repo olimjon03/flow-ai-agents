@@ -1,5 +1,6 @@
 """Media Studio API. Only project-generated media is served."""
 
+from ipaddress import ip_address
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,6 +33,7 @@ class Action(BaseModel):
     stage: Literal["script", "image", "voice", "video", "editor"] | None = None
     allowPaid: StrictBool = False
     allowPaidImages: StrictBool = False
+    acknowledgeUncertainHive: StrictBool = False
     feedback: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)] | None = None
 
     @model_validator(mode="after")
@@ -45,6 +47,8 @@ class Action(BaseModel):
         if self.allowPaidImages and not (self.action == "approve-script"
                                          or self.action == "regenerate" and self.stage == "image"):
             raise ValueError("Paid image consent is only available when approving a script or regenerating images.")
+        if self.acknowledgeUncertainHive and not self.allowPaidImages:
+            raise ValueError("Acknowledgement requires paid image consent.")
         return self
 
 
@@ -67,7 +71,7 @@ async def read_model(request, model):
 def project_response(request, project):
     studio = request.app.state.studio
     return {
-        **project,
+        **{key: value for key, value in project.items() if key not in {"replacementJob", "replacementStages"}},
         "deployStoryboardAvailable": studio.office.provider.mode == "deploy" and project["brief"]["durationSeconds"] == 30,
         "imageQuote": studio.image_quote(project),
         "estimatedImageSpendUsd": project.get("imageAttempts", 0) * IMAGE_COST / NANODOLLARS,
@@ -101,11 +105,18 @@ async def project(request: Request, project_id: str):
 @router.post("/projects/{project_id}/actions")
 async def action(request: Request, project_id: str):
     data = await read_model(request, Action)
+    if data.allowPaidImages:
+        try:
+            local_client = bool(request.client and ip_address(request.client.host).is_loopback)
+        except ValueError:
+            local_client = False
+        if not local_client or request.url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise HTTPException(403, "Paid Hive images are only available on localhost.")
     try:
         updated = request.app.state.studio.action(
-            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages,
+            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages, data.acknowledgeUncertainHive,
         )
-        return project_response(request, updated)
+        return project_response(request, request.app.state.studio.store.get(updated["id"]))
     except MediaError as error:
         raise HTTPException(409, str(error)) from None
 
