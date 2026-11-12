@@ -8,7 +8,7 @@ type Snapshot = {
   settings: Settings; activated: boolean; paused: boolean; dry_run_complete: boolean;
   pending_timezone: { timezone: string; effective_at: string } | null;
   used_today: number; local_date: string;
-  profiles: { id: string; name: string; userDataDirectory: string }[];
+  profiles: { id: string; name: string; userDataDirectory: string; downloadDirectory: string }[];
   jobs: { id: string; profile: string; source: string; state: string }[];
 };
 
@@ -120,7 +120,7 @@ export function DailyVideoSettings() {
         <details className="mt-4">
           <summary>Mock Chrome profiles</summary>
           <ul className="mt-2 text-sm">{snapshot.profiles.map((profile) =>
-            <li key={profile.id}>{profile.name} · <code>{profile.userDataDirectory}</code></li>)}</ul>
+            <li key={profile.id}>{profile.name} · <code>{profile.userDataDirectory}</code> · <code>{profile.downloadDirectory}</code></li>)}</ul>
         </details>
         {snapshot.jobs.length > 0 && <ul aria-label="Recent daily video jobs" className="mt-4 space-y-2 text-sm">
           {snapshot.jobs.map((job) => <li key={job.id}>

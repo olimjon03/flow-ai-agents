@@ -1,5 +1,8 @@
 """Media Studio API. Only project-generated media is served."""
 
+import asyncio
+import tempfile
+from pathlib import Path
 from ipaddress import ip_address
 from typing import Annotated, Literal
 
@@ -8,9 +11,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, ValidationError, model_validator
 
 from ..agents import NANODOLLARS
+from ..local_access import require_local_mutation
 from .hive_image_provider import IMAGE_COST
 from .media import MediaError
-from .store import MEDIA_TYPES
+from .store import ID, MEDIA_TYPES
+from .video_import import MAX_MP4_BYTES, verify_mp4_signature
 
 router = APIRouter(prefix="/api/studio")
 
@@ -34,6 +39,7 @@ class Action(BaseModel):
     allowPaid: StrictBool = False
     allowPaidImages: StrictBool = False
     acknowledgeUncertainHive: StrictBool = False
+    confirmDiscardImported: StrictBool = False
     reviewedAssetId: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")] | None = None
     feedback: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)] | None = None
 
@@ -45,6 +51,8 @@ class Action(BaseModel):
             raise ValueError("Rejection requires feedback.")
         if (self.action in {"approve", "reject"}) != (self.reviewedAssetId is not None):
             raise ValueError("Final review requires the reviewed asset ID.")
+        if self.confirmDiscardImported and self.action not in {"approve-script", "regenerate"}:
+            raise ValueError("Imported clip confirmation requires a production action.")
         if self.allowPaid and self.action != "approve-script":
             raise ValueError("Paid consent is only available when approving a script.")
         if self.allowPaidImages and not (self.action == "approve-script"
@@ -117,11 +125,50 @@ async def action(request: Request, project_id: str):
             raise HTTPException(403, "Paid Hive images are only available on localhost.")
     try:
         updated = request.app.state.studio.action(
-            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages, data.acknowledgeUncertainHive, reviewed_asset_id=data.reviewedAssetId,
+            project_for(request, project_id), data.action, data.stage, data.feedback, data.allowPaid, data.allowPaidImages, data.acknowledgeUncertainHive, reviewed_asset_id=data.reviewedAssetId, confirm_discard=data.confirmDiscardImported,
         )
         return project_response(request, request.app.state.studio.store.get(updated["id"]))
     except MediaError as error:
         raise HTTPException(409, str(error)) from None
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/import", status_code=202)
+async def import_clip(request: Request, project_id: str, scene_id: str, expected_export: str,
+                      confirm_replace: Literal["yes"] | None = None):
+    require_local_mutation(request)
+    if not ID.fullmatch(scene_id) or not ID.fullmatch(expected_export):
+        raise HTTPException(422, "Invalid scene or export ID.")
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "video/mp4":
+        raise HTTPException(415, "Upload a video/mp4 file.")
+    if request.headers.get("content-encoding", "identity").lower() != "identity":
+        raise HTTPException(415, "Compressed request bodies are not supported.")
+    length = request.headers.get("content-length")
+    if length and (not length.isascii() or not length.isdigit() or len(length) > 9 or int(length) > MAX_MP4_BYTES):
+        raise HTTPException(413, "The MP4 exceeds the 32 MiB limit.")
+    studio = request.app.state.studio
+    confirmed = confirm_replace == "yes"
+    try:
+        studio.check_clip_import(project_for(request, project_id), scene_id, expected_export, confirmed)
+        with studio.store.upload_slot() as acquired:
+            if not acquired:
+                raise HTTPException(429, "Another MP4 upload is in progress. Try again shortly.")
+            with tempfile.TemporaryDirectory(prefix=".upload-", dir=studio.store.directory(project_id)) as directory:
+                source = Path(directory) / "upload.mp4"
+                size = 0
+                async with asyncio.timeout(60):
+                    with source.open("xb") as file:
+                        async for chunk in request.stream():
+                            size += len(chunk)
+                            if size > MAX_MP4_BYTES:
+                                raise HTTPException(413, "The MP4 exceeds the 32 MiB limit.")
+                            file.write(chunk)
+                verify_mp4_signature(source)
+                studio.launch_clip_import(project_for(request, project_id), scene_id, expected_export, source, confirmed)
+    except TimeoutError:
+        raise HTTPException(408, "The MP4 upload timed out.") from None
+    except MediaError as error:
+        raise HTTPException(409, str(error)) from None
+    return project_response(request, project_for(request, project_id))
 
 
 @router.get("/projects/{project_id}/assets/{asset_id}")

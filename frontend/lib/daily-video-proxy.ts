@@ -1,25 +1,12 @@
+import { localMutationError } from "./local-mutation.ts";
 import { errorResponse, readJsonBody } from "./http-json.ts";
 
 export async function forwardDailyVideo(request: Request, fetcher = fetch) {
   const write = request.method === "POST";
   let body: string | undefined;
   if (write) {
-    const url = new URL(request.url);
-    const localAuthority = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/i;
-    const host = request.headers.get("host");
-    const forwarded = request.headers.get("x-forwarded-for");
-    if (!localAuthority.test(url.host) || (host && !localAuthority.test(host))
-      || (forwarded && !forwarded.split(",").every((peer) =>
-        ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(peer.trim())))) {
-      return errorResponse("Daily Video settings may only be changed on localhost.", 403);
-    }
-    const origin = request.headers.get("origin");
-    const fetchSite = request.headers.get("sec-fetch-site");
-    // Next may normalize its internal URL to localhost; the validated Host is the browser authority.
-    const browserOrigin = new URL(`${url.protocol}//${host ?? url.host}`).origin;
-    if (fetchSite === "cross-site" || (origin && origin !== browserOrigin)) {
-      return errorResponse("Cross-origin requests are not supported.", 403);
-    }
+    const denied = localMutationError(request);
+    if (denied) return denied;
     if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return errorResponse("Expected JSON.", 415);
     }

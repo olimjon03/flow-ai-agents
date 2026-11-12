@@ -12,6 +12,7 @@ from ..agents import AgentError, AgentTask, Budget, MockProvider, NANODOLLARS, S
 from ..deploy_provider import attempt_cost
 from ..orchestrator import AGENTS, now
 from .hive_image_provider import IMAGE_COST, HiveImageRejected
+from .video_import import ManualVideoProvider
 from .storyboard import deepseek_scenes, scene_record
 from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, VideoProvider, publish_image, write_audio
 
@@ -50,7 +51,7 @@ class Replacement:
     lease: BinaryIO
 
 
-ACTIVE_MEDIA = ("assets", "finalAssetId", "approval", "feedback", "approvedAssetId")
+ACTIVE_MEDIA = ("assets", "finalAssetId", "approval", "feedback", "approvedAssetId", "lastApprovedAssetId")
 ACTIVE_PLAN = ("script", "review", "scenes", "scriptApproved")
 STORYBOARD_OUTPUT_LIMIT = 1800
 
@@ -66,9 +67,11 @@ class Studio:
         self.voice = MockVoice()
         self.ffmpeg = ffmpeg or FFmpeg()
         self.video = video if video is not None else self.ffmpeg
+        self.manual_video = ManualVideoProvider(self.ffmpeg)
         self.active = None
         self.worker = None
         self.replacement = None
+        store.recover_uploads()
         for project in store.list():
             if not store.recover_batches(project):
                 continue
@@ -154,7 +157,7 @@ class Studio:
             "script": None, "review": None, "scenes": [], "assets": [], "finalAssetId": None,
             "stages": {stage: {"status": "queued", "progress": 0} for stage in DESKS},
             "activity": [], "approval": "pending", "approvedAssetId": None, "feedback": None, "scriptApproved": False,
-            "error": None,
+            "error": None, "lastApprovedAssetId": None,
         }
         if daily_profile is not None:
             project["dailyProfile"] = daily_profile
@@ -185,7 +188,7 @@ class Studio:
         self.save(project)
         self.office.publish()
 
-    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset(), daily=False):
+    def launch(self, project, stages, *, paid_storyboard=False, paid_images=False, keep_images=frozenset(), daily=False, clip_import=None):
         if self.busy():
             raise MediaError("An Office workflow is already running.")
         project.update(status="working", error=None, approval="pending", feedback=None, approvedAssetId=None)
@@ -200,13 +203,18 @@ class Studio:
                 desk = DESKS[stage]
                 self.office.agents[desk] = replace(self.office.agents[desk], task=f"Media Studio · {stage}")
                 self.update(project, stage, "queued", 0, f"{stage.capitalize()} queued")
-        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images, daily=daily))
+        self.worker = self.office.worker = asyncio.create_task(self.execute(project, stages, paid_storyboard, paid_images, keep_images, daily=daily, clip_import=clip_import))
         if self.replacement:
             self.worker.add_done_callback(lambda _: self.finish_replacement(project))
         return project
 
-    def reset(self, project, stages, keep_images=frozenset()):
+    def reset(self, project, stages, keep_images=frozenset(), *, keep_manual=False):
+        last_approved = project.get("lastApprovedAssetId") or project.get("approvedAssetId")
+        project["lastApprovedAssetId"] = last_approved
+        scene_ids = {scene["id"] for scene in project["scenes"]} if keep_manual else set()
         removed = [asset for asset in project["assets"] if asset["stage"] in stages
+                   and asset["id"] != last_approved and not asset.get("archived")
+                   and not (asset.get("provider") == "manual" and asset["sceneId"] in scene_ids)
                    and not (asset["stage"] == "image" and asset.get("provider") == "hive"
                             and asset["sceneId"] in keep_images)]
         removed_ids = {asset["id"] for asset in removed}
@@ -219,11 +227,11 @@ class Studio:
             project["stages"][stage] = {"status": "queued", "progress": 0}
         return removed
 
-    def regenerate(self, project, reset_stages, run_stages, *, paid_images=False, keep_images=frozenset()):
+    def regenerate(self, project, reset_stages, run_stages, *, paid_images=False, keep_images=frozenset(), keep_manual=False):
         replacing = bool(project["finalAssetId"])
         if replacing:
             self.begin_replacement(project)
-        removed = self.reset(project, reset_stages, keep_images)
+        removed = self.reset(project, reset_stages, keep_images, keep_manual=keep_manual)
         self.launch(project, run_stages, paid_images=paid_images, keep_images=keep_images)
         if not replacing:
             self.delete_assets(project, removed)
@@ -260,7 +268,7 @@ class Studio:
         )
 
     def action(self, project, action, stage, feedback, allow_paid=False, allow_paid_images=False,
-               acknowledge_uncertain=False, *, reviewed_asset_id=None):
+               acknowledge_uncertain=False, *, reviewed_asset_id=None, confirm_discard=False):
         if allow_paid_images and project.get("hiveUncertain") and not acknowledge_uncertain:
             raise MediaError("A previous Hive attempt may have been billed. Acknowledge it before resubmitting.")
         if action == "cancel":
@@ -274,6 +282,7 @@ class Studio:
         can_approve = (project["status"] in {"awaiting_script_approval", "failed", "cancelled"}
                        and project["script"] and project["scenes"] and not project["scriptApproved"])
         if action == "approve-script" and can_approve:
+            self.require_manual_discard_confirmation(project, confirm_discard)
             if allow_paid_images:
                 self.check_paid_images(project, 5 if allow_paid else len(project["scenes"]))
             if allow_paid and (self.office.provider.mode != "deploy" or project["brief"]["durationSeconds"] != 30):
@@ -294,6 +303,7 @@ class Studio:
             if project["status"] not in {"failed", "cancelled", "awaiting_script_approval", "awaiting_approval", "approved", "rejected"}:
                 raise MediaError("Start the project before regenerating a stage.")
             if stage == "script":
+                self.require_manual_discard_confirmation(project, confirm_discard)
                 return self.regenerate(project, DESKS, PLAN)
             if not project["scriptApproved"]:
                 raise MediaError("Approve the storyboard before producing media.")
@@ -307,7 +317,8 @@ class Studio:
                 if project["status"] in {"failed", "cancelled"} and project["stages"]["image"]["status"] != "completed":
                     keep_images = self.reusable_images(project)
                 self.check_paid_images(project, len(project["scenes"]) - len(keep_images))
-            return self.regenerate(project, required, required, paid_images=allow_paid_images, keep_images=keep_images)
+            return self.regenerate(project, required, required, paid_images=allow_paid_images, keep_images=keep_images,
+                                   keep_manual=not confirm_discard)
         if action in {"approve", "reject"} and project["status"] in {"awaiting_approval", "approved", "rejected"}:
             if not reviewed_asset_id or reviewed_asset_id != project["finalAssetId"]:
                 raise MediaError("The final export changed. Review the current MP4 before submitting a decision.")
@@ -317,11 +328,28 @@ class Studio:
             reviewed = {**project, "status": decision, "approval": decision, "updatedAt": now(),
                         "approvedAssetId": reviewed_asset_id if action == "approve" else None,
                         "feedback": feedback if action == "reject" else None}
+            previous = project.get("lastApprovedAssetId") or project.get("approvedAssetId")
+            reviewed["lastApprovedAssetId"] = previous
+            if action == "approve":
+                reviewed["lastApprovedAssetId"] = reviewed_asset_id
+                if previous and previous != reviewed_asset_id:
+                    reviewed["assets"] = [
+                        {**asset, "archived": True} if asset["id"] == previous else asset
+                        for asset in project["assets"]
+                    ]
             if not self.store.save_review(reviewed, reviewed_asset_id, project["updatedAt"]):
                 raise MediaError("The final export changed. Reload the project and review the current MP4.")
             project.update(reviewed)
             return project
         raise MediaError("This action is unavailable for the current project state.")
+
+    @staticmethod
+    def require_manual_discard_confirmation(project, confirmed, scene_id=None):
+        if not confirmed and any(
+            asset.get("provider") == "manual" and (scene_id is None or asset["sceneId"] == scene_id)
+            for asset in project["assets"]
+        ):
+            raise MediaError("Confirm before replacing or discarding imported clips.")
 
     @staticmethod
     def cancel_stages(project):
@@ -343,7 +371,7 @@ class Studio:
         self.office.publish()
         return True
 
-    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images, *, daily=False):
+    async def execute(self, project, stages, paid_storyboard, paid_images, keep_images, *, daily=False, clip_import=None):
         try:
             if "storyboard" in stages and not paid_storyboard:
                 await self.plan(project)
@@ -363,7 +391,12 @@ class Studio:
                         else:
                             await self.run_stage(project, "image", self.images)
                     if "video" in stages:
-                        await self.run_stage(project, "video", self.clips)
+                        if clip_import:
+                            async def import_scene(current):
+                                await self.import_scene(current, *clip_import)
+                            await self.run_stage(project, "video", import_scene)
+                        else:
+                            await self.run_stage(project, "video", self.clips)
 
                 async with asyncio.TaskGroup() as group:
                     group.create_task(visuals())
@@ -557,9 +590,53 @@ class Studio:
         width, height = (360, 640) if project["brief"]["resolution"] == "test" else (1080, 1920)
         return (width, height) if project["brief"]["aspect"] == "9:16" else (height, width)
 
+    def check_clip_import(self, project, scene_id, expected_export, confirmed):
+        if self.busy() or project["status"] == "working":
+            raise MediaError("Wait for the active workflow before importing a clip.")
+        if (project["brief"]["aspect"] != "9:16" or not expected_export
+            or project["finalAssetId"] != expected_export or not self.store.asset(project, expected_export)):
+            raise MediaError("Open the current vertical export before importing a clip.")
+        scene = next((item for item in project["scenes"] if item["id"] == scene_id), None)
+        if not scene:
+            raise MediaError("The scene is no longer part of this export.")
+        self.require_manual_discard_confirmation(project, confirmed, scene_id)
+        return scene
+
+    def launch_clip_import(self, project, scene_id, expected_export, upload, confirmed=False):
+        scene = self.check_clip_import(project, scene_id, expected_export, confirmed)
+        for item in project["scenes"]:
+            if item["id"] != scene_id:
+                self.require_asset(project, ".mp4", "video", item["id"])
+        self.require_asset(project, ".wav", "voice")
+        self.require_asset(project, ".srt", "voice")
+        self.begin_replacement(project)
+        source = self.store.batch_directory(project["id"], self.replacement.id) / "input.mp4"
+        try:
+            upload.replace(source)
+        except OSError:
+            project.update(status="failed", error="Could not stage the uploaded clip.")
+            self.finish_replacement(project)
+            raise MediaError("Could not stage the uploaded clip.") from None
+        self.reset(project, ("editor",))
+        project["assets"] = [asset for asset in project["assets"]
+                             if not (asset["stage"] == "video" and asset["sceneId"] == scene_id)]
+        return self.launch(project, ("video", "editor"), clip_import=(scene, source))
+
+    async def import_scene(self, project, scene, source):
+        width, height = self.resolution(project)
+        try:
+            await self.generate_asset(project, "video", ".mp4", "Imported scene clip",
+                                      lambda path: self.manual_video.generate(source, path, scene["duration"], (width, height)),
+                                      scene["id"], width=width, height=height, duration=scene["duration"], provider="manual")
+        finally:
+            source.unlink(missing_ok=True)
+
     async def clips(self, project):
         size = self.resolution(project)
+        manual_scenes = {asset["sceneId"] for asset in project["assets"] if asset.get("provider") == "manual"}
         for scene in project["scenes"]:
+            if scene["id"] in manual_scenes:
+                continue
             image = self.require_asset(project, ".png", "image", scene["id"])
             await self.generate_asset(project, "video", ".mp4", "Image-to-video placeholder",
                                       lambda path: self.video.generate(image, path, scene["duration"], size),
@@ -578,11 +655,15 @@ class Studio:
             asset_id = await self.generate_asset(project, "editor", ".wav", "Original background tone", background_tone)
             background, _ = self.store.asset(project, asset_id)
         width, height = self.resolution(project)
-        project["finalAssetId"] = await self.generate_asset(
-            project, "editor", ".mp4", "Final MP4",
-            lambda path: self.ffmpeg.export(
+        async def render(path):
+            await self.ffmpeg.export(
                 clips, [scene["duration"] for scene in project["scenes"]],
                 audio, subtitles, path, duration, background,
-            ),
+            )
+            if self.replacement:
+                await self.manual_video.validate_export(path, duration, (width, height))
+
+        project["finalAssetId"] = await self.generate_asset(
+            project, "editor", ".mp4", "Final MP4", render,
             width=width, height=height, duration=duration,
         )

@@ -12,7 +12,7 @@ type Scene = { id: string; index: number; start: number; duration: number; descr
 type ProjectSummary = { id: string; topic: string; status: string };
 type Project = {
   id: string; brief: Brief; status: string; script: string | null; review: string | null;
-  scenes: Scene[]; assets: Asset[]; finalAssetId: string | null; error: string | null;
+  scenes: Scene[]; assets: Asset[]; finalAssetId: string | null; lastApprovedAssetId?: string | null; error: string | null;
   stages: Record<string, { status: string; progress: number }>;
   activity: { at: string; stage: string; message: string }[];
   approval: string; feedback: string | null; scriptApproved: boolean; deployStoryboardAvailable: boolean;
@@ -30,8 +30,10 @@ const displayStatus = (value: string) => value.replaceAll("_", " ");
 const assetUrl = (projectId: string, assetId: string) => `${projectsUrl}/${projectId}/assets/${assetId}`;
 
 async function request<T>(url: string, signal?: AbortSignal, payload?: object): Promise<T> {
+  const upload = payload instanceof File;
   const response = await fetch(url, payload ? {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,
+    method: "POST", headers: { "Content-Type": upload ? "video/mp4" : "application/json" },
+    body: upload ? payload : JSON.stringify(payload), signal,
   } : { signal, cache: "no-store" });
   const result = await response.json();
   if (!response.ok) throw new Error(result.detail || result.error || "Studio request failed.");
@@ -78,8 +80,9 @@ function PaidImageConsent({ checked, onChange, disabled, estimate, cap }: {
   </label>;
 }
 
-function ProjectView({ project, pending, onAction }: {
+function ProjectView({ project, pending, onAction, onImport }: {
   project: Project; pending: boolean; onAction: (action: string, extra?: object) => void;
+  onImport: (sceneId: string, exportId: string, file: File, replace: boolean) => void;
 }) {
   const [acknowledgedHive, setAcknowledgedHive] = useState(false);
   const [paidImages, setPaidImages] = useState(false);
@@ -87,6 +90,8 @@ function ProjectView({ project, pending, onAction }: {
   const [paidStoryboard, setPaidStoryboard] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [regenerate, setRegenerate] = useState("script");
+  const [discardImported, setDiscardImported] = useState(false);
+  const hasImported = project.assets.some((asset) => asset.provider === "manual");
   const working = project.status === "working";
   const canReviewFinal = ["awaiting_approval", "approved", "rejected"].includes(project.status);
   const canApproveScript = ["awaiting_script_approval", "failed", "cancelled"].includes(project.status)
@@ -97,6 +102,8 @@ function ProjectView({ project, pending, onAction }: {
   const requiresHiveAcknowledgement = !!project.hiveUncertain && (paidImages || paidRegeneration);
   const captions = project.assets.find((asset) => asset.extension === ".vtt");
   const final = project.finalAssetId ? assetUrl(project.id, project.finalAssetId) : null;
+  const lastApproved = project.lastApprovedAssetId && project.lastApprovedAssetId !== project.finalAssetId
+    ? assetUrl(project.id, project.lastApprovedAssetId) : null;
 
   return (
     <div className="studio-content">
@@ -133,11 +140,12 @@ function ProjectView({ project, pending, onAction }: {
               {combinedOverBudget && " Increase the Office run budget or select one paid option."}
             </p>}
             <button disabled={pending || combinedOverBudget || (paidImages && requiresHiveAcknowledgement && !acknowledgedHive)} onClick={() => {
+              if (hasImported && !window.confirm("Starting a new storyboard will discard imported clips. Continue?")) return;
               const allowPaid = project.deployStoryboardAvailable && paidStoryboard;
               setPaidStoryboard(false);
               setPaidImages(false);
               setAcknowledgedHive(false);
-              onAction("approve-script", { allowPaid, allowPaidImages: !!project.imageQuote && paidImages,
+              onAction("approve-script", { confirmDiscardImported: hasImported, allowPaid, allowPaidImages: !!project.imageQuote && paidImages,
                 acknowledgeUncertainHive: paidImages && requiresHiveAcknowledgement && acknowledgedHive });
             }}>{project.deployStoryboardAvailable && paidStoryboard ? "Approve script and generate DeepSeek storyboard" : "Approve script and storyboard"}</button>
           </>}
@@ -145,19 +153,27 @@ function ProjectView({ project, pending, onAction }: {
           {!working && project.status !== "draft" && (
             <form className="studio-actions" onSubmit={(event) => {
               event.preventDefault();
+              const confirmDiscardImported = hasImported && (regenerate === "script" || discardImported);
+              if (confirmDiscardImported && !window.confirm("This regeneration can discard imported clips. Continue?")) return;
+              setDiscardImported(false);
               setPaidStoryboard(false);
               setPaidImages(false);
               setPaidRegeneration(false);
               setAcknowledgedHive(false);
               onAction("regenerate", {
-                stage: regenerate, allowPaidImages: regenerate === "image" && !!project.imageQuote && paidRegeneration,
+                stage: regenerate, confirmDiscardImported, allowPaidImages: regenerate === "image" && !!project.imageQuote && paidRegeneration,
                 acknowledgeUncertainHive: paidRegeneration && requiresHiveAcknowledgement && acknowledgedHive,
               });
             }}>
-              <label>Regenerate stage<select value={regenerate} onChange={(event) => { setRegenerate(event.target.value); setPaidRegeneration(false); setAcknowledgedHive(false); }}>
+              <label>Regenerate stage<select value={regenerate} onChange={(event) => { setRegenerate(event.target.value); setDiscardImported(false); setPaidRegeneration(false); setAcknowledgedHive(false); }}>
                 {["script", "image", "voice", "video", "editor"].filter((stage) => stage === "script" || project.scriptApproved)
                   .map((stage) => <option key={stage} value={stage}>{stageLabels[stage]}</option>)}
               </select></label>
+              {hasImported && ["image", "video"].includes(regenerate) && <label className="studio-check">
+                <input type="checkbox" checked={discardImported} disabled={pending}
+                  onChange={(event) => setDiscardImported(event.target.checked)} />
+                Replace imported clips with generated clips
+              </label>}
               {regenerate === "image" && project.scriptApproved && project.imageQuote &&
                 <PaidImageConsent checked={paidRegeneration} onChange={setPaidRegeneration} disabled={pending}
                   estimate={project.imageQuote.estimatedCostUsd} cap={project.imageQuote.maxCostUsd} />}
@@ -180,7 +196,19 @@ function ProjectView({ project, pending, onAction }: {
               <h3>Scene {scene.index + 1} · {scene.start}–{scene.start + scene.duration}s</h3>
               <p>Voiceover · {scene.narration}</p><p>Visual prompt · {scene.prompt}</p>
               {image && <img src={assetUrl(project.id, image.id)} alt={`${image.provider === "hive" ? "Hive" : "Mock"} image for scene ${scene.index + 1}`} />}
-              {video && <video controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
+              {video && <video key={video.id} controls preload="none" aria-label={`Scene ${scene.index + 1} video`} src={assetUrl(project.id, video.id)} />}
+              {video?.provider === "manual" && <p>Imported MP4</p>}
+              {project.finalAssetId && project.brief.aspect === "9:16" && <label>
+                Import MP4 for scene {scene.index + 1}
+                <input type="file" accept="video/mp4,.mp4" disabled={pending || working} onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  const replace = video?.provider === "manual";
+                  if (file && project.finalAssetId && (!replace || window.confirm("Replace this imported clip?"))) {
+                    onImport(scene.id, project.finalAssetId, file, replace);
+                  }
+                }} />
+              </label>}
             </article>;
           })}
         </div>
@@ -191,6 +219,7 @@ function ProjectView({ project, pending, onAction }: {
 
       <section className="panel studio-panel">
         <h2>Final export</h2>
+        {lastApproved && <a href={`${lastApproved}?download=true`}>Download last approved MP4</a>}
         {final ? <>
           <video key={final} controls preload="metadata" className="studio-final" aria-label="Final MP4" src={final}>
             {captions && <track kind="subtitles" label={project.brief.language} src={assetUrl(project.id, captions.id)} default />}
@@ -292,7 +321,14 @@ export function Studio() {
           ))}</ul>
         </aside>
         {project && project.id === id && <ProjectView key={project.id} project={project} pending={pending}
-          onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })} />}
+          onAction={(action, extra) => void mutate(`${projectsUrl}/${project.id}/actions`, { action, ...extra })}
+          onImport={(sceneId, exportId, file, replace) => {
+            if (file.size > 32 * 1024 * 1024) {
+              setError("The MP4 exceeds the 32 MiB limit.");
+              return;
+            }
+            void mutate(`${projectsUrl}/${project.id}/scenes/${sceneId}/import?expected_export=${exportId}${replace ? "&confirm_replace=yes" : ""}`, file);
+          }} />}
       </div>
     </div>
   );

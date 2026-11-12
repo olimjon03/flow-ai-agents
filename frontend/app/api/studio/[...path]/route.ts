@@ -1,3 +1,4 @@
+import { forwardClipImport } from "../../../../lib/clip-import-proxy.ts";
 import { errorResponse, readJsonBody } from "../../../../lib/http-json.ts";
 
 type Context = { params: Promise<{ path: string[] }> };
@@ -10,6 +11,10 @@ async function forward(request: Request, context: Context) {
   const list = group === "projects" && path.length === 1;
   const detail = group === "projects" && path.length === 2 && id.test(project);
   const media = group === "projects" && path.length === 4 && id.test(project) && resource === "assets" && id.test(asset);
+  if (!reading && group === "projects" && id.test(project) && resource === "scenes"
+    && id.test(asset) && path.length === 5 && path[4] === "import") {
+    return forwardClipImport(request, project, asset);
+  }
   const action = group === "projects" && path.length === 3 && id.test(project) && resource === "actions";
   if (!(list || (reading ? detail || media : action))) return errorResponse("Studio route not found.", 404);
 

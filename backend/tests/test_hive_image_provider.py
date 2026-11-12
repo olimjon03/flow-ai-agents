@@ -341,7 +341,15 @@ class HiveStudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(finished["finalAssetId"], before["finalAssetId"])
         self.assertFalse(finished["hiveUncertain"])
         self.assertIsNotNone(self.studio.store.asset(finished, finished["finalAssetId"]))
-        self.assertIsNone(self.studio.store.asset(finished, before["finalAssetId"]))
+        self.assertEqual(finished["lastApprovedAssetId"], before["finalAssetId"])
+        previous = self.studio.store.asset(finished, before["finalAssetId"])
+        self.assertIsNotNone(previous)
+        self.assertFalse(previous[1].get("archived"))
+        response = await self.action("approve", reviewedAssetId=finished["finalAssetId"])
+        self.assertEqual(response.status_code, 200)
+        approved = response.json()
+        self.assertEqual(approved["lastApprovedAssetId"], finished["finalAssetId"])
+        self.assertTrue(self.studio.store.asset(approved, before["finalAssetId"])[1]["archived"])
 
     async def test_restart_cleans_orphan_stage_and_preserves_approved_media(self):
         before = await self.seed_approved_export()
