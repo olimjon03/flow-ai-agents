@@ -192,16 +192,16 @@ function ProjectView({ project, pending, onAction }: {
       <section className="panel studio-panel">
         <h2>Final export</h2>
         {final ? <>
-          <video controls preload="metadata" className="studio-final" aria-label="Final MP4" src={final}>
+          <video key={final} controls preload="metadata" className="studio-final" aria-label="Final MP4" src={final}>
             {captions && <track kind="subtitles" label={project.brief.language} src={assetUrl(project.id, captions.id)} default />}
           </video>
           <div className="studio-actions">
             <a href={`${final}?download=true`}>Download MP4</a>
-            <button disabled={pending || !canReviewFinal} onClick={() => onAction("approve")}>Approve final video</button>
+            <button disabled={pending || !canReviewFinal} onClick={() => onAction("approve", { reviewedAssetId: project.finalAssetId })}>Approve final video</button>
           </div>
           <form className="studio-actions" onSubmit={(event) => {
             event.preventDefault();
-            onAction("reject", { feedback: feedback.trim() });
+            onAction("reject", { feedback: feedback.trim(), reviewedAssetId: project.finalAssetId });
           }}>
             <label>Rejection feedback<input required maxLength={1000} value={feedback} onChange={(event) => setFeedback(event.target.value)} /></label>
             <button disabled={pending || !canReviewFinal || !feedback.trim()}>Reject final video</button>
@@ -232,7 +232,9 @@ export function Studio() {
     const controller = new AbortController();
     request<ProjectSummary[]>(projectsUrl, controller.signal).then((list) => {
       setProjects(list);
-      setId((selected) => selected ?? list[0]?.id ?? null);
+      const requested = new URLSearchParams(window.location.search).get("project");
+      const initial = list.find((item) => item.id === requested) ?? list[0];
+      setId((selected) => selected ?? initial?.id ?? null);
     }).catch((failure) => { if (!controller.signal.aborted) setError(failure.message); });
     return () => controller.abort();
   }, []);

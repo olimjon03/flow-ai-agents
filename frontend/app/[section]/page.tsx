@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { DailyVideoSettings } from "../../components/daily-video-settings";
 import { PageFrame } from "../../components/page-frame";
 import { settings, tools } from "../../lib/navigation";
 
@@ -22,6 +23,7 @@ export default async function WorkspacePage({ params }: Props) {
   if (section === "settings") {
     return (
       <PageFrame title="Settings" description="Local workspace and generation configuration.">
+        <DailyVideoSettings />
         <section className="panel section-panel" aria-labelledby="settings-title">
           <h2 id="settings-title" className="section-title">Generation</h2>
           <dl className="settings-list">

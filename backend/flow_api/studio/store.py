@@ -36,6 +36,17 @@ class ProjectStore:
                 (project["id"], project["createdAt"], json.dumps(project, ensure_ascii=False)),
             )
 
+    def save_review(self, project, asset_id, previous_updated_at):
+        with closing(self.connect()) as db, db:
+            cursor = db.execute(
+                "UPDATE projects SET data=? WHERE id=? AND json_extract(data, '$.finalAssetId')=? "
+                "AND json_extract(data, '$.replacementJob') IS NULL "
+                "AND json_extract(data, '$.status') IN ('awaiting_approval', 'approved', 'rejected') "
+                "AND json_extract(data, '$.updatedAt')=?",
+                (json.dumps(project, ensure_ascii=False), project["id"], asset_id, previous_updated_at),
+            )
+            return cursor.rowcount == 1
+
     def claim_replacement(self, project, job_id):
         with closing(self.connect()) as db, db:
             cursor = db.execute(

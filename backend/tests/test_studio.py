@@ -111,6 +111,7 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         self.studio.action(project, "approve-script", None, None)
         await asyncio.wait_for(self.studio.worker, 35)
         self.assertEqual(project["status"], "awaiting_approval", project["error"])
+        old_id = project["finalAssetId"]
         final, metadata = self.studio.store.asset(project, project["finalAssetId"])
         self.assertEqual((metadata["width"], metadata["height"], metadata["duration"]), (1080, 1920, 30))
         probe = subprocess.run([self.studio.ffmpeg.executable, "-hide_banner", "-i", str(final)],
@@ -118,7 +119,7 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         for marker in ("Video: h264", "1080x1920", "Audio: aac", "Subtitle: mov_text", "Duration: 00:00:30"):
             self.assertIn(marker, probe)
 
-        self.studio.action(project, "reject", None, "Revise the export.")
+        self.studio.action(project, "reject", None, "Revise the export.", reviewed_asset_id=project["finalAssetId"])
         self.assertEqual(ProjectStore(self.root).get(project["id"])["feedback"], "Revise the export.")
         original_images = {asset["id"] for asset in project["assets"] if asset["stage"] == "image"}
         self.studio.action(project, "regenerate", "editor", None)
@@ -127,13 +128,22 @@ class StudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(project["status"], "awaiting_approval", project["error"])
         self.assertFalse(final.exists())
         self.assertEqual({asset["id"] for asset in project["assets"] if asset["stage"] == "image"}, original_images)
-        self.studio.action(project, "approve", None, None)
+        with self.assertRaisesRegex(MediaError, "export changed"):
+            self.studio.action(project, "approve", None, None, reviewed_asset_id=old_id)
+        self.assertIsNone(ProjectStore(self.root).get(project["id"])["approvedAssetId"])
+        self.studio.action(project, "approve", None, None, reviewed_asset_id=project["finalAssetId"])
         restarted = create_app(media_root=self.root)
         async with restarted.router.lifespan_context(restarted), httpx.AsyncClient(
             base_url="http://test", transport=httpx.ASGITransport(app=restarted)
         ) as client:
             response = await client.get(f"/api/studio/projects/{project['id']}")
             self.assertEqual(response.json()["approval"], "approved")
+            self.assertEqual(response.json()["approvedAssetId"], project["finalAssetId"])
+            stale = await client.post(f"/api/studio/projects/{project['id']}/actions",
+                                      json={"action": "approve", "reviewedAssetId": old_id})
+            self.assertEqual(stale.status_code, 409)
+            missing = await client.post(f"/api/studio/projects/{project['id']}/actions", json={"action": "approve"})
+            self.assertEqual(missing.status_code, 422)
             download = await client.get(f"/api/studio/projects/{project['id']}/assets/{project['finalAssetId']}",
                                         headers={"Range": "bytes=0-63"})
             self.assertEqual(download.status_code, 206)
