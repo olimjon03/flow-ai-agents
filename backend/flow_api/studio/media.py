@@ -4,19 +4,82 @@ import asyncio
 import math
 import os
 import shutil
+import stat
 import struct
+import tempfile
 import wave
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from PIL import Image, ImageOps
 
 
 class MediaError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class ImageRequest:
+    prompt: str
+    scene_index: int
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class ImageResult:
+    provider: str
+
+
 class ImageProvider(Protocol):
-    async def generate(self, output: Path, scene: dict, vertical: bool): ...
+    async def generate(self, request: ImageRequest, destination: Path) -> ImageResult: ...
+
+
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_PIXELS = 16_000_000
+
+
+def normalize_png(source: Path, destination: Path, request: ImageRequest) -> tuple[int, int]:
+    try:
+        file = source.lstat()
+        if not stat.S_ISREG(file.st_mode) or not 0 < file.st_size <= MAX_IMAGE_BYTES:
+            raise MediaError("The image is missing or exceeds the file size limit.")
+        with Image.open(source, formats=["PNG"]) as image:
+            width, height = image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise MediaError("The image exceeds the pixel limit.")
+            if image.is_animated:
+                raise MediaError("The image must be a single PNG frame.")
+            image.verify()
+        with Image.open(source, formats=["PNG"]) as image:
+            image.load()
+            normalized = image.convert("RGB")
+            if width * request.height != height * request.width:
+                normalized = ImageOps.fit(normalized, (request.width, request.height), Image.Resampling.LANCZOS)
+            normalized.info.clear()
+            normalized.save(destination, format="PNG")
+            if destination.stat().st_size > MAX_IMAGE_BYTES:
+                raise MediaError("The normalized image exceeds the file size limit.")
+            return normalized.size
+    except Image.DecompressionBombError:
+        raise MediaError("The image exceeds the pixel limit.") from None
+    except (OSError, SyntaxError, ValueError):
+        raise MediaError("The provider did not produce a valid PNG.") from None
+
+
+async def publish_image(provider: ImageProvider, request: ImageRequest, destination: Path):
+    # Stage on the same filesystem so the validated file can be published atomically.
+    with tempfile.TemporaryDirectory(prefix=".image-", dir=destination.parent) as directory:
+        source = Path(directory) / "source.png"
+        normalized = Path(directory) / "validated.png"
+        result = await provider.generate(request, source)
+        width, height = await write_local(normalize_png, source, normalized, request)
+        normalized.chmod(0o600)
+        normalized.replace(destination)
+    return {"width": width, "height": height, "provider": result.provider,
+            "label": "Mock scene image" if result.provider == "mock" else "Generated scene image"}
 
 
 class VoiceProvider(Protocol):
@@ -59,16 +122,17 @@ def write_audio(path, duration, frequency):
 async def write_local(writer, *args):
     worker = asyncio.create_task(asyncio.to_thread(writer, *args))
     try:
-        await asyncio.shield(worker)
+        return await asyncio.shield(worker)
     except asyncio.CancelledError:
         await asyncio.gather(worker, return_exceptions=True)
         raise
 
 
 class MockImage:
-    async def generate(self, output, scene, vertical):
-        size = (180, 320) if vertical else (320, 180)
-        await write_local(write_png, output, *size, scene["index"])
+    async def generate(self, request: ImageRequest, destination: Path) -> ImageResult:
+        size = (180, 320) if request.width < request.height else (320, 180)
+        await write_local(write_png, destination, *size, request.scene_index)
+        return ImageResult(provider="mock")
 
 
 class MockVoice:

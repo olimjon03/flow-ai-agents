@@ -8,7 +8,7 @@ from uuid import uuid4
 from ..agents import AgentError, AgentTask, Budget, MockProvider, STEPS
 from ..orchestrator import AGENTS, now
 from .storyboard import deepseek_scenes, scene_record
-from .media import FFmpeg, MediaError, MockImage, MockVoice, write_audio
+from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, MockImage, MockVoice, publish_image, write_audio
 
 DESKS = {
     "research": "scout", "script": "quill", "review": "guard", "storyboard": "muse",
@@ -38,10 +38,10 @@ def mock_script_cues(script, timestamps):
 
 
 class Studio:
-    def __init__(self, store, office, ffmpeg=None):
+    def __init__(self, store, office, ffmpeg=None, *, image: ImageProvider | None = None):
         self.store = store
         self.office = office
-        self.image = MockImage()
+        self.image = image if image is not None else MockImage()
         self.voice = MockVoice()
         self.ffmpeg = ffmpeg or FFmpeg()
         self.video = self.ffmpeg
@@ -292,17 +292,23 @@ class Studio:
     async def generate_asset(self, project, stage, extension, label, operation, scene_id=None, **metadata):
         asset_id = uuid4().hex
         path = self.store.path(project["id"], asset_id, extension)
+        asset = {"id": asset_id, "stage": stage, "extension": extension, "label": label, "sceneId": scene_id}
         try:
-            await operation(path)
+            generated = await operation(path)
             if not path.is_file() or not path.stat().st_size:
                 raise MediaError("A provider did not produce a media file.")
+            asset.update(bytes=path.stat().st_size, **metadata)
+            if generated is not None:
+                asset.update(generated)
+            project["assets"].append(asset)
+            try:
+                self.save(project)
+            except Exception:
+                project["assets"].pop()
+                raise
         except BaseException:
             path.unlink(missing_ok=True)
             raise
-        asset = {"id": asset_id, "stage": stage, "extension": extension, "label": label,
-                 "sceneId": scene_id, "bytes": path.stat().st_size, **metadata}
-        project["assets"].append(asset)
-        self.save(project)
         return asset_id
 
     def require_asset(self, project, extension, stage, scene_id=None):
@@ -314,11 +320,11 @@ class Studio:
         raise MediaError(f"Required {stage} media is missing. Regenerate that stage.")
 
     async def images(self, project):
-        vertical = project["brief"]["aspect"] == "9:16"
+        width, height = self.resolution(project)
         for scene in project["scenes"]:
-            await self.generate_asset(project, "image", ".png", "Mock scene image",
-                                      lambda path: self.image.generate(path, scene, vertical), scene["id"],
-                                      width=180 if vertical else 320, height=320 if vertical else 180)
+            request = ImageRequest(scene["prompt"], scene["index"], width, height)
+            await self.generate_asset(project, "image", ".png", "Scene image",
+                                      lambda path: publish_image(self.image, request, path), scene["id"])
             self.update(project, "image", "working", (scene["index"] + 1) * 90 // len(project["scenes"]), "Scene image ready")
 
     async def narration(self, project):
