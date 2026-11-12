@@ -13,7 +13,9 @@ async function forward(request: Request, context: Context) {
   const storage = reading && group === "storage" && path.length === 1;
   const importStatus = reading && group === "projects" && path.length === 4 && id.test(project)
     && resource === "imports" && id.test(asset);
-  if (storage || importStatus) {
+  const feasibility = reading && group === "projects" && path.length === 3 && id.test(project)
+    && resource === "video-feasibility";
+  if (storage || importStatus || feasibility) {
     const denied = localMutationError(request);
     if (denied) return denied;
   }
@@ -24,7 +26,7 @@ async function forward(request: Request, context: Context) {
     return forwardClipImport(request, project, asset);
   }
   const action = group === "projects" && path.length === 3 && id.test(project) && resource === "actions";
-  if (!(list || (reading ? detail || media || storage || importStatus : action))) return errorResponse("Studio route not found.", 404);
+  if (!(list || (reading ? detail || media || storage || importStatus || feasibility : action))) return errorResponse("Studio route not found.", 404);
 
   const url = new URL(request.url);
   const headers = new Headers();

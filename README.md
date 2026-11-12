@@ -217,3 +217,7 @@ The Studio storage panel shows archived export count, tracked archive bytes, and
 4. Regenerate Video or Image with the replacement option unchecked. Confirm the five imports and last approved MP4 remain accessible while the replacement awaits approval. Approve the replacement and confirm the archive count increases.
 5. Attempt a replacement and decline the confirmation. Then try an invalid MP4 in a separate attempt. Verify the prior approved export remains downloadable.
 6. With a temporary local media root, set the floor above the available disk space and restart FastAPI. Confirm the storage warning appears and export attempts are rejected while existing exports remain readable.
+
+### Google Flow manual feasibility
+
+The localhost guide is disabled by default. Set `FLOW_GOOGLE_FLOW_MANUAL=1` when starting the backend to use it with a six-second scene in a finished vertical project. Follow the [policy findings, setup and acceptance checklist](docs/GOOGLE_FLOW_FEASIBILITY.md). The official Gemini adapter is preflight-only.

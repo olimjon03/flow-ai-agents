@@ -19,6 +19,8 @@ export async function forwardClipImport(request: Request, projectId: string, sce
   if (!request.body) return errorResponse("An MP4 file is required.", 400);
   const params = new URL(request.url).searchParams;
   const expectedExport = params.get("expected_export");
+  const source = params.get("source");
+  if (source !== null && source !== "google_flow") return errorResponse("Unknown clip source.", 422);
   const replaceAsset = params.get("replace_asset");
   const digest = request.headers.get("x-flow-clip-sha256");
   if ((replaceAsset !== null || digest !== null) &&
@@ -34,6 +36,7 @@ export async function forwardClipImport(request: Request, projectId: string, sce
       process.env.FLOW_OFFICE_API_URL || "http://127.0.0.1:8001");
     upstream.searchParams.set("expected_export", expectedExport!);
     if (replaceAsset) upstream.searchParams.set("replace_asset", replaceAsset);
+    if (source) upstream.searchParams.set("source", source);
     const headers = new Headers({ "Content-Type": "video/mp4" });
     const filename = request.headers.get("x-flow-clip-name");
     if (filename) headers.set("X-Flow-Clip-Name", filename);

@@ -236,3 +236,40 @@ test("keeps selected files across unrelated exports, stale confirmation and canc
   await expect(page.getByText("Selected · cancelled.mp4")).toBeVisible();
   await other.close();
 });
+
+test("guides a Google Flow download through a local verified import", async ({ page }) => {
+  test.setTimeout(80_000);
+  await page.goto("/media-studio");
+  await page.getByLabel("Topic", { exact: true }).fill("Manual Flow sample");
+  await page.getByRole("button", { name: "Create project" }).click();
+  await expect(page.getByRole("heading", { name: "Manual Flow sample", exact: true })).toBeVisible();
+  await page.getByText("Google Flow manual feasibility", { exact: true }).click();
+  await expect(page.getByText("Status · manual required")).toBeVisible();
+  await expect(page.getByText(/Gemini API fallback · disabled/)).toBeVisible();
+  await page.getByRole("button", { name: "Start mock workflow" }).click();
+  await page.getByRole("button", { name: "Approve script and storyboard" }).click();
+  await expect(page.getByText("Status · ready for user action")).toBeVisible({ timeout: 35_000 });
+  await page.getByRole("button", { name: "Approve final video" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^approved$/ })).toBeVisible();
+  const approved = await page.getByLabel("Final MP4").getAttribute("src");
+  await page.getByLabel("Check selected six-second clips as manual Google Flow downloads").check();
+  await page.getByLabel("Import MP4 for scene 1").setInputFiles({
+    name: "broken.mp4", mimeType: "video/mp4", buffer: Buffer.from("invalid mp4"),
+  });
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
+  await expect(page.getByText("Status · failed")).toBeVisible();
+  await expect(page.getByText("Selected · broken.mp4")).toBeVisible();
+  const moving = execFileSync(process.env.FLOW_FFMPEG_BIN || "ffmpeg", [
+    "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=90x160:rate=24",
+    "-t", "6", "-c:v", "libx264", "-threads", "2", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1",
+  ]);
+  const response = page.waitForResponse((candidate) => candidate.request().method() === "POST"
+    && new URL(candidate.url()).searchParams.get("source") === "google_flow");
+  await page.getByLabel("Import MP4 for scene 1").setInputFiles({ name: "sample.mp4", mimeType: "video/mp4", buffer: moving });
+  await page.getByRole("button", { name: "Import scene 1", exact: true }).click();
+  expect((await (await response).json()).importOperationId).toMatch(/^[a-f0-9]{32}$/);
+  await expect(page.getByText("Status · completed")).toBeVisible({ timeout: 25_000 });
+  await expect(page.getByText("Google Flow source selected by user · motion check passed")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download last approved MP4" })).toHaveAttribute("href", `${approved}?download=true`);
+  await expect(page.getByText("Audio · Studio mock tone · no spoken narration")).toBeVisible();
+});

@@ -67,9 +67,9 @@ class ManualVideoProvider:
         except ValueError:
             raise MediaError("The MP4 has invalid stream metadata.") from None
 
-    async def probe(self, source: Path):
+    async def probe(self, source: Path, *, sample_duration=None):
         info = await self.inspect(
-            source, "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,duration:stream_disposition=attached_pic",
+            source, "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,duration,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation",
         )
         try:
             tracks = [track for track in info["streams"] if track["codec_type"] == "video"]
@@ -88,6 +88,12 @@ class ManualVideoProvider:
             raise MediaError("The imported video must be between 0.25 and 120 seconds.")
         if not (2 <= width <= 4096 and 2 <= height <= 4096 and width * height <= 8_847_360 and 0 < fps <= 120):
             raise MediaError("The imported video exceeds supported dimensions or frame rate.")
+        if sample_duration is not None:
+            rotated = any(item.get("rotation", 0) % 360 for item in video.get("side_data_list", ()))
+            if width * 16 != height * 9 or rotated or video.get("sample_aspect_ratio") not in {None, "1:1"}:
+                raise MediaError("The Google Flow sample needs a 9:16 portrait MP4.")
+            if abs(video_duration - sample_duration) > 0.15:
+                raise MediaError(f"The clip is {video_duration:.2f}s. Select a {sample_duration}-second Google Flow sample.")
         return video_duration
 
     async def validate_export(self, source: Path, duration: int, size: tuple[int, int]):
@@ -110,9 +116,9 @@ class ManualVideoProvider:
         await self.ffmpeg.run("-xerror", "-threads", "2", *LOCAL_INPUT, "-i", source,
                               "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-")
 
-    async def generate(self, source: Path, output: Path, duration: int, size: tuple[int, int]):
+    async def generate(self, source: Path, output: Path, duration: int, size: tuple[int, int], *, strict_sample=False):
         verify_mp4_signature(source)
-        source_duration = await self.probe(source)
+        source_duration = await self.probe(source, sample_duration=duration if strict_sample else None)
         width, height = size
         filters = (f"fps=24,scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"

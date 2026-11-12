@@ -9,7 +9,7 @@ type Brief = {
   aspect: string; gender: string; resolution: string; backgroundAudio: boolean;
 };
 type Asset = { id: string; extension: string; label: string; stage: string; sceneId: string | null; provider?: string;
-  filename?: string | null; language?: string | null; sourceDuration?: number; importedScenes?: number; sceneCount?: number;
+  filename?: string | null; videoSource?: string; language?: string | null; sourceDuration?: number; importedScenes?: number; sceneCount?: number;
 };
 type Scene = { id: string; index: number; start: number; duration: number; description: string; narration: string; prompt: string };
 type ProjectSummary = { id: string; topic: string; status: string };
@@ -25,7 +25,13 @@ type Project = {
 };
 
 type Storage = { archiveBytes: number; archivedExports: number; freeBytes: number; floorBytes: number; renderPaused: boolean };
-type SceneProgress = Record<string, { status: ImportStatus; message?: string }>;
+type SceneProgress = Record<string, { status: ImportStatus; message?: string; googleFlow?: boolean }>;
+type Feasibility = {
+  googleFlow: "unsupported" | "manual_required" | "ready_for_user_action";
+  gemini: { status: string; model: string; estimatedVideoUsd: string; planningReservationUsd: string };
+};
+
+const googleSample = "9:16 portret, 6 soniya, uzluksiz kadr. Samarqanddagi hunarmand ustaxonasida usta ko‘k sopol piyolani aylantirib, unga naqsh chizadi. Kamera sekin yaqinlashadi, tabiiy tong yorug‘ligi, ekranda matn yo‘q.";
 
 const importLabels: Record<ImportStatus, string> = {
   uploading: "Uploading", rendering: "Normalizing and rendering", imported: "Imported", failed: "Import stopped",
@@ -110,10 +116,22 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
   const [regenerate, setRegenerate] = useState("script");
   const [discardImported, setDiscardImported] = useState(false);
   const [selectedClips, setSelectedClips] = useState<Record<string, File>>({});
+  const [feasibility, setFeasibility] = useState<Feasibility | null>(null);
+  const [googleFlow, setGoogleFlow] = useState(false);
+  const { id, finalAssetId } = project;
+  useEffect(() => {
+    const controller = new AbortController();
+    void request<Feasibility>(`${projectsUrl}/${id}/video-feasibility`, controller.signal)
+      .then((result) => { if (!controller.signal.aborted) setFeasibility(result); })
+      .catch(() => { if (!controller.signal.aborted) setFeasibility(null); });
+    return () => controller.abort();
+  }, [id, finalAssetId]);
+  const googleReady = feasibility?.googleFlow === "ready_for_user_action";
   const imports = project.scenes.flatMap((scene) => {
     const file = selectedClips[scene.id];
     const existing = project.assets.find((asset) => asset.sceneId === scene.id && asset.provider === "manual");
-    return file ? [{ sceneId: scene.id, file, replaceAssetId: existing?.id ?? null }] : [];
+    return file ? [{ sceneId: scene.id, file, replaceAssetId: existing?.id ?? null,
+      googleFlow: googleFlow && googleReady }] : [];
   });
   function submitImports(items: SceneImport[]) {
     const replacements = items.filter((item) => item.replaceAssetId).map(({ sceneId, file }) => {
@@ -130,6 +148,11 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
   }
   const hasImported = project.assets.some((asset) => asset.provider === "manual");
   const working = project.status === "working";
+  const googleProgress = project.scenes.map((scene) => importProgress[scene.id]).filter((item) => item?.googleFlow);
+  const googleState = googleProgress.some((item) => item.status === "uploading" || item.status === "rendering") ? "importing"
+    : googleProgress.some((item) => item.status === "failed") ? "failed"
+    : googleProgress.some((item) => item.status === "imported") ? "completed"
+    : feasibility?.googleFlow;
   const canReviewFinal = ["awaiting_approval", "approved", "rejected"].includes(project.status);
   const canApproveScript = ["awaiting_script_approval", "failed", "cancelled"].includes(project.status)
     && !!project.script && project.scenes.length > 0 && !project.scriptApproved;
@@ -224,6 +247,29 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
         </div>
       </section>
 
+      {feasibility && <details className="panel studio-panel">
+        <summary>Google Flow manual feasibility</summary>
+        <p>Status · {googleState?.replaceAll("_", " ")}</p>
+        <p>Gemini API fallback · {feasibility.gemini.status.replaceAll("_", " ")} · {feasibility.gemini.model} · preflight only</p>
+        {feasibility.gemini.status !== "disabled" && <p>
+          Six-second 720p estimate · ${Number(feasibility.gemini.estimatedVideoUsd).toFixed(2)} video output ·
+          ${feasibility.gemini.planningReservationUsd} planning allowance
+        </p>}
+        {feasibility.googleFlow === "unsupported" ? <p>The guide requires local opt-in and a vertical project.</p> : <>
+          <p lang="uz">{googleSample}</p>
+          <a href="https://flow.google.com/" target="_blank" rel="noreferrer">Open Google Flow manually</a>
+          <ol>
+            <li>In Google Flow, check that the model supports 9:16, six seconds and a single output. Review the displayed credit cost and available balance before you personally confirm generation.</li>
+            <li>Review visible watermark requirements. Use the asset menu to download the video file, and keep the original with its watermark.</li>
+            <li>Check motion and the intended Studio scene. Select the local MP4 and review the staged export before approval.</li>
+          </ol>
+          {googleReady ? <label className="studio-check">
+            <input type="checkbox" checked={googleFlow} disabled={pending || working}
+              onChange={(event) => setGoogleFlow(event.target.checked)} />
+            Check selected six-second clips as manual Google Flow downloads
+          </label> : <p>Produce a baseline vertical export with a six-second scene to start.</p>}
+        </>}
+      </details>}
       {project.scenes.length > 0 && <section className="panel studio-panel">
         <h2>Storyboard and editing timeline</h2>
         {project.brief.aspect === "9:16" && project.finalAssetId && <>
@@ -248,6 +294,7 @@ function ProjectView({ project, pending, renderPaused, importProgress, onAction,
               {video?.provider === "manual" ? <>
                 <p>Imported MP4</p>
                 {video.filename && <p>{video.filename}</p>}
+                {video.videoSource === "google_flow_manual" && <p>Google Flow source selected by user · motion check passed</p>}
                 {sourceDuration !== undefined && Math.abs(sourceDuration - scene.duration) > 1 / 24 && <p>
                   Source {sourceDuration.toFixed(2)}s → target {scene.duration}s · {sourceDuration > scene.duration ? "trimmed" : "last frame held"}
                 </p>}
@@ -387,11 +434,12 @@ export function Studio() {
     setError("");
     try {
       await importScenesInOrder(items, project, {
-        upload: async ({ sceneId, file, replaceAssetId }, expectedExport) => {
+        upload: async ({ sceneId, file, replaceAssetId, googleFlow }, expectedExport) => {
           if (!file.size || file.size > 32 * 1024 * 1024) {
             throw new Error("Choose a nonempty MP4 file up to 32 MiB.");
           }
           const params = new URLSearchParams({ expected_export: expectedExport });
+          if (googleFlow) params.set("source", "google_flow");
           let digest: string | undefined;
           if (replaceAssetId) {
             params.set("replace_asset", replaceAssetId);
@@ -409,12 +457,12 @@ export function Studio() {
         ),
         update: setProject,
         report: (sceneId, status, message) => {
-          setImportProgress((previous) => ({ ...previous, [sceneId]: { status, message } }));
+          const selected = items.find((item) => item.sceneId === sceneId);
+          setImportProgress((previous) => ({ ...previous, [sceneId]: { status, message, googleFlow: selected?.googleFlow } }));
           const scene = project.scenes.find((item) => item.id === sceneId);
           setImportAnnouncement(`Scene ${(scene?.index ?? 0) + 1}. ${importLabels[status]}${message ? `. ${message}` : ""}`);
           if (status === "imported") {
-            const imported = items.find((item) => item.sceneId === sceneId);
-            if (imported) onImported(imported);
+            if (selected) onImported(selected);
           }
           if (status !== "rendering") activeImportId.current = null;
         },
