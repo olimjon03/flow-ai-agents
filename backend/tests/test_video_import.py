@@ -12,6 +12,7 @@ import httpx
 from flow_api.app import create_app
 from flow_api.studio.media import MediaError
 from flow_api.studio.store import ProjectStore
+from flow_api.studio.video_feasibility import OfficialGeminiVideoProvider
 
 
 class VideoImportTests(unittest.IsolatedAsyncioTestCase):
@@ -346,3 +347,84 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(ProjectStore(self.studio.store.root).clip_import(
             second_project["id"], third.json()["importOperationId"],
         ))
+
+    def test_gemini_fallback_requires_flag_credentials_consent_and_budget(self):
+        provider = OfficialGeminiVideoProvider()
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(provider.preflight(), "disabled")
+            os.environ["FLOW_GEMINI_VIDEO_PREFLIGHT"] = "1"
+            self.assertEqual(provider.preflight(), "missing_credentials")
+            os.environ["GEMINI_API_KEY"] = "local-test-fixture"
+            self.assertEqual(provider.preflight(), "consent_required")
+            self.assertEqual(provider.preflight(consent=True), "budget_exceeded")
+            os.environ["FLOW_GEMINI_VIDEO_MAX_USD"] = "NaN"
+            self.assertEqual(provider.preflight(consent=True), "budget_exceeded")
+            os.environ["FLOW_GEMINI_VIDEO_MAX_USD"] = "1.00"
+            self.assertEqual(provider.preflight(consent=True), "transport_unavailable")
+
+    async def test_google_flow_manual_validation_uses_existing_operations_and_rollback(self):
+        project = await self.prepare()
+        approved = project["approvedAssetId"]
+        state_url = self.base + "/video-feasibility"
+        headers = {"Content-Type": "video/mp4"}
+        with patch.dict(os.environ, {"FLOW_GOOGLE_FLOW_MANUAL": "0", "FLOW_GEMINI_VIDEO_PREFLIGHT": "0"}):
+            state = await self.client.get(state_url)
+            self.assertEqual(state.json()["googleFlow"], "unsupported")
+            self.assertEqual(state.json()["gemini"]["status"], "disabled")
+            denied = await self.client.post(self.route(project) + "&source=google_flow", content=b"disabled", headers=headers)
+            self.assertEqual(denied.status_code, 409)
+        with patch.dict(os.environ, {"FLOW_GOOGLE_FLOW_MANUAL": "1"}):
+            denied = await self.client.get(state_url, headers={"Origin": "https://foreign.test"})
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual((await self.client.get(state_url)).json()["googleFlow"], "ready_for_user_action")
+            original = await self.client.get(f"{self.base}/assets/{approved}")
+            short = await self.fixture("libx264", size="90x160")
+            for payload, message in ((b"bad MP4", "signature"), (short, "6-second")):
+                accepted = await self.client.post(self.route(project) + "&source=google_flow", content=payload, headers=headers)
+                if accepted.status_code == 202:
+                    await self.studio.worker
+                    result = (await self.operation(accepted))["operation"]
+                    self.assertEqual(result["status"], "failed")
+                    self.assertIn(message, result["error"])
+                else:
+                    self.assertEqual(accepted.status_code, 409, accepted.text)
+                    self.assertIn(message, accepted.json()["detail"])
+                project = await self.project()
+                self.assertEqual(project["approvedAssetId"], approved)
+
+            static = self.root / "static.mp4"
+            await self.studio.ffmpeg.run("-f", "lavfi", "-i", "color=red:size=90x160:rate=24",
+                                         "-t", "6", "-c:v", "libx264", "-threads", "2", static)
+            accepted = await self.client.post(self.route(project) + "&source=google_flow", content=static.read_bytes(), headers=headers)
+            self.assertEqual(accepted.status_code, 202)
+            await self.studio.worker
+            self.assertIn("No frame changes", (await self.operation(accepted))["operation"]["error"])
+
+            clip = await self.fixture("libx264", size="90x160", duration="6")
+            started = asyncio.Event()
+
+            async def wait_for_cancel(*args):
+                started.set()
+                await asyncio.Event().wait()
+
+            with patch.object(self.studio.google_flow, "generate", wait_for_cancel):
+                accepted = await self.client.post(self.route(project) + "&source=google_flow", content=clip, headers=headers)
+                self.assertEqual(accepted.status_code, 202)
+                await asyncio.wait_for(started.wait(), 5)
+                worker = self.studio.worker
+                cancelled = await self.client.post(self.base + "/actions", json={
+                    "action": "cancel", "cancelImportOperationId": accepted.json()["importOperationId"],
+                })
+                self.assertEqual(cancelled.status_code, 200)
+                await asyncio.gather(worker, return_exceptions=True)
+            self.assertEqual((await self.operation(accepted))["operation"]["status"], "cancelled")
+
+            accepted = await self.client.post(self.route(project) + "&source=google_flow", content=clip, headers=headers)
+            self.assertEqual(accepted.status_code, 202)
+            await self.studio.worker
+            snapshot = await self.operation(accepted)
+            self.assertEqual(snapshot["operation"]["status"], "succeeded", snapshot["operation"]["error"])
+            asset = next(a for a in snapshot["project"]["assets"] if a["id"] == snapshot["operation"]["resultAssetId"])
+            self.assertEqual((asset["videoSource"], asset["sourceDuration"]), ("google_flow_manual", 6))
+            self.assertEqual(snapshot["project"]["lastApprovedAssetId"], approved)
+            self.assertEqual((await self.client.get(f"{self.base}/assets/{approved}")).content, original.content)

@@ -1,4 +1,4 @@
-export type SceneImport = { sceneId: string; file: File; replaceAssetId: string | null };
+export type SceneImport = { sceneId: string; file: File; replaceAssetId: string | null; googleFlow?: boolean };
 export type ImportStatus = "uploading" | "rendering" | "imported" | "failed";
 type ImportProject = {
   id: string;

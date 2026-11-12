@@ -19,6 +19,8 @@ export default defineConfig({
       url: "http://127.0.0.1:8101/health",
       env: {
         FLOW_OFFICE_PROVIDER: "mock",
+        FLOW_GOOGLE_FLOW_MANUAL: "1",
+        FLOW_GEMINI_VIDEO_PREFLIGHT: "0",
         FLOW_MEDIA_ROOT: join(tmpdir(), `flow-ai-studio-tests-${process.pid}`),
       },
       reuseExistingServer: false,

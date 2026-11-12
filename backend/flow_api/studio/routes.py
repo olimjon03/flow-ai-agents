@@ -20,6 +20,7 @@ from ..local_access import require_local_mutation
 from .hive_image_provider import IMAGE_COST
 from .media import MediaError, StorageFull
 from .store import ID, MEDIA_TYPES
+from .video_feasibility import OfficialGeminiVideoProvider
 from .video_import import MAX_MP4_BYTES, verify_mp4_signature
 
 router = APIRouter(prefix="/api/studio")
@@ -148,6 +149,20 @@ async def action(request: Request, project_id: str):
         raise HTTPException(409, str(error)) from None
 
 
+@router.get("/projects/{project_id}/video-feasibility")
+async def video_feasibility(request: Request, project_id: str):
+    require_local_mutation(request)
+    project = project_for(request, project_id)
+    fallback = OfficialGeminiVideoProvider()
+    return {
+        "googleFlow": request.app.state.studio.google_flow.status(project),
+        "gemini": {
+            "status": fallback.preflight(), "model": fallback.model,
+            "estimatedVideoUsd": str(fallback.video_estimate), "planningReservationUsd": str(fallback.reservation),
+        },
+    }
+
+
 @router.get("/projects/{project_id}/imports/{operation_id}")
 async def clip_import_status(request: Request, project_id: str, operation_id: str):
     require_local_mutation(request)
@@ -160,7 +175,7 @@ async def clip_import_status(request: Request, project_id: str, operation_id: st
 
 @router.post("/projects/{project_id}/scenes/{scene_id}/import", status_code=202)
 async def import_clip(request: Request, project_id: str, scene_id: str, expected_export: str,
-                      replace_asset: str | None = None):
+                      replace_asset: str | None = None, source: Literal["google_flow"] | None = None):
     require_local_mutation(request)
     if not ID.fullmatch(scene_id) or not ID.fullmatch(expected_export):
         raise HTTPException(422, "Invalid scene or export ID.")
@@ -186,18 +201,19 @@ async def import_clip(request: Request, project_id: str, scene_id: str, expected
         raise HTTPException(422, "The clip filename is invalid.") from None
     filename = "".join(character for character in name if not unicodedata.category(character).startswith("C")).strip()[:150]
     studio = request.app.state.studio
+    google_flow = source == "google_flow"
     try:
-        studio.check_clip_import(project_for(request, project_id), scene_id, expected_export, replace_asset)
+        studio.check_clip_import(project_for(request, project_id), scene_id, expected_export, replace_asset, google_flow=google_flow)
         studio.require_render_space(int(length) if length else MAX_MP4_BYTES)
         with studio.store.upload_slot() as acquired:
             if not acquired:
                 raise HTTPException(429, "Another MP4 upload is in progress. Try again shortly.")
             with tempfile.TemporaryDirectory(prefix=".upload-", dir=studio.store.directory(project_id)) as directory:
-                source = Path(directory) / "upload.mp4"
+                upload_path = Path(directory) / "upload.mp4"
                 size = 0
                 digest = hashlib.sha256()
                 async with asyncio.timeout(60):
-                    with source.open("xb") as file:
+                    with upload_path.open("xb") as file:
                         async for chunk in request.stream():
                             size += len(chunk)
                             if size > MAX_MP4_BYTES:
@@ -207,9 +223,10 @@ async def import_clip(request: Request, project_id: str, scene_id: str, expected
                 source_sha256 = digest.hexdigest()
                 if expected_digest and source_sha256 != expected_digest:
                     raise MediaError("The selected file changed after confirmation. Confirm the replacement again.")
-                verify_mp4_signature(source)
+                verify_mp4_signature(upload_path)
                 operation_id = studio.launch_clip_import(
-                    project_for(request, project_id), scene_id, expected_export, source, replace_asset, source_sha256, filename or None,
+                    project_for(request, project_id), scene_id, expected_export, upload_path, replace_asset, source_sha256, filename or None,
+                    google_flow=google_flow,
                 )
     except TimeoutError:
         raise HTTPException(408, "The MP4 upload timed out.") from None

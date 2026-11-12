@@ -10,7 +10,7 @@ const digest = "e".repeat(64);
 
 test("clip import proxy streams bytes and binds the upload to the current export", async () => {
   const body = new Uint8Array([0, 1, 2, 3]);
-  const incoming = new Request(`http://localhost/import?expected_export=${exportId}&replace_asset=${replaceAsset}`, {
+  const incoming = new Request(`http://localhost/import?expected_export=${exportId}&replace_asset=${replaceAsset}&source=google_flow`, {
     method: "POST", headers: { "Content-Type": "video/mp4", Origin: "http://localhost", "X-Flow-Clip-Sha256": digest }, body,
   });
   const result = await forwardClipImport(incoming, project, scene, async (url, options) => {
@@ -18,6 +18,7 @@ test("clip import proxy streams bytes and binds the upload to the current export
     assert.equal(target.pathname, `/api/studio/projects/${project}/scenes/${scene}/import`);
     assert.equal(target.searchParams.get("expected_export"), exportId);
     assert.equal(target.searchParams.get("replace_asset"), replaceAsset);
+    assert.equal(target.searchParams.get("source"), "google_flow");
     assert.equal(new Headers(options?.headers).get("x-flow-clip-sha256"), digest);
     assert.deepEqual(new Uint8Array(await new Response(options?.body).arrayBuffer()), body);
     return Response.json({ status: "working" }, { status: 202 });

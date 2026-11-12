@@ -13,6 +13,7 @@ from ..deploy_provider import attempt_cost
 from ..orchestrator import AGENTS, now
 from .hive_image_provider import IMAGE_COST, HiveImageRejected
 from .video_import import ManualVideoProvider
+from .video_feasibility import GoogleFlowFeasibilityProvider
 from .storyboard import deepseek_scenes, scene_record
 from .media import FFmpeg, ImageProvider, ImageRequest, MediaError, StorageFull, MockImage, MockVoice, VideoProvider, publish_image, write_audio
 
@@ -69,6 +70,7 @@ class Studio:
         self.ffmpeg = ffmpeg or FFmpeg()
         self.video = video if video is not None else self.ffmpeg
         self.manual_video = ManualVideoProvider(self.ffmpeg)
+        self.google_flow = GoogleFlowFeasibilityProvider(self.manual_video)
         self.active = None
         self.worker = None
         self.replacement = None
@@ -632,7 +634,7 @@ class Studio:
         width, height = (360, 640) if project["brief"]["resolution"] == "test" else (1080, 1920)
         return (width, height) if project["brief"]["aspect"] == "9:16" else (height, width)
 
-    def check_clip_import(self, project, scene_id, expected_export, replace_asset):
+    def check_clip_import(self, project, scene_id, expected_export, replace_asset, *, google_flow=False):
         if self.busy() or project["status"] == "working":
             raise MediaError("Wait for the active workflow before importing a clip.")
         if (project["brief"]["aspect"] != "9:16" or not expected_export
@@ -641,14 +643,16 @@ class Studio:
         scene = next((item for item in project["scenes"] if item["id"] == scene_id), None)
         if not scene:
             raise MediaError("The scene is no longer part of this export.")
+        if google_flow:
+            self.google_flow.require_scene(project, scene)
         target = next((asset for asset in project["assets"] if asset["stage"] == "video" and asset["sceneId"] == scene_id), None)
         manual_id = target["id"] if target and target.get("provider") == "manual" else None
         if manual_id != replace_asset:
             raise MediaError("Confirm replacement of the current imported clip for this scene and retry.")
         return scene, target["id"] if target else None
 
-    def launch_clip_import(self, project, scene_id, expected_export, upload, replace_asset, source_sha256, filename):
-        scene, target = self.check_clip_import(project, scene_id, expected_export, replace_asset)
+    def launch_clip_import(self, project, scene_id, expected_export, upload, replace_asset, source_sha256, filename, *, google_flow=False):
+        scene, target = self.check_clip_import(project, scene_id, expected_export, replace_asset, google_flow=google_flow)
         self.require_render_space()
         for item in project["scenes"]:
             if item["id"] != scene_id:
@@ -666,14 +670,15 @@ class Studio:
         self.reset(project, ("editor",))
         project["assets"] = [asset for asset in project["assets"]
                              if not (asset["stage"] == "video" and asset["sceneId"] == scene_id)]
-        self.launch(project, ("video", "editor"), clip_import=(scene, source, filename))
+        self.launch(project, ("video", "editor"), clip_import=(scene, source, filename, google_flow))
         return operation_id
 
-    async def import_scene(self, project, scene, source, filename):
+    async def import_scene(self, project, scene, source, filename, google_flow):
+        provider = self.google_flow if google_flow else self.manual_video
         width, height = self.resolution(project)
         try:
             await self.generate_asset(project, "video", ".mp4", "Imported scene clip",
-                                      lambda path: self.manual_video.generate(source, path, scene["duration"], (width, height)),
+                                      lambda path: provider.generate(source, path, scene["duration"], (width, height)),
                                       scene["id"], width=width, height=height, duration=scene["duration"], provider="manual", filename=filename)
         finally:
             source.unlink(missing_ok=True)
