@@ -120,6 +120,7 @@ test("imports five moving clips sequentially and approves the Uzbek export", asy
   expect(submitted).toHaveLength(5);
   expect(new Set(submitted.map((url) => new URL(url).searchParams.get("expected_export"))).size).toBe(5);
   await expect(page.getByText(/Uzbek script and subtitles/)).toBeVisible();
+  await expect(page.getByText("Voiceover · Bugun Uzbek five-scene project haqida gaplashamiz.")).toBeVisible();
   await expect(page.getByRole("link", { name: "Download last approved MP4" })).toBeVisible();
   await page.getByRole("button", { name: "Approve final video" }).click();
   await expect(status("approved")).toBeVisible();

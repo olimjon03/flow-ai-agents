@@ -455,9 +455,20 @@ class Studio:
                 result = await provider.generate(step, task, outputs, self.office.budget, lambda _: None)
                 if stage == "script" and brief["durationSeconds"] == 30:
                     cues = mock_script_cues(result, (0, 15, 30))
-                    opening, main, closing = cues.groups()
-                    result = "\n".join((result[:cues.start()], f"0s — {opening}", "6s — Set the scene.",
-                                        f"12s — {main}", "18s — Show the idea in action.", f"24s — {closing}"))
+                    if brief["language"].strip().casefold() == "uzbek":
+                        lines = (
+                            f"Bugun {brief['topic']} haqida gaplashamiz.",
+                            "Avval vaziyatni qisqacha ko‘rib chiqamiz.",
+                            "Endi asosiy fikrga e’tibor beraylik.",
+                            "Keling, bu fikr amalda qanday ko‘rinishini ko‘ramiz.",
+                            "Xulosa qilib, eng muhim fikrni eslab qolaylik.",
+                        )
+                    else:
+                        opening, main, closing = cues.groups()
+                        lines = (opening, "Set the scene.", main, "Show the idea in action.", closing)
+                    result = "\n".join((result[:cues.start()], *(
+                        f"{second}s — {line}" for second, line in zip(range(0, 30, 6), lines, strict=True)
+                    )))
                 outputs[step.label] = result
                 if stage in {"script", "review"}:
                     current[stage] = result

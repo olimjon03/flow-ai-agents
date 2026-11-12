@@ -214,6 +214,7 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
         project = original
         self.assertEqual(project["brief"]["language"], "Uzbek")
         self.assertEqual([scene["duration"] for scene in project["scenes"]], [6] * 5)
+        self.assertEqual(project["scenes"][0]["narration"], "Bugun Moving scene haqida gaplashamiz.")
         clip = await self.fixture("libx264")
         for index, scene in enumerate(original["scenes"], 1):
             route = f"{self.base}/scenes/{scene['id']}/import?expected_export={project['finalAssetId']}"
@@ -229,6 +230,11 @@ class VideoImportTests(unittest.IsolatedAsyncioTestCase):
             imported = next(a for a in project["assets"] if a["sceneId"] == scene["id"] and a.get("provider") == "manual")
             self.assertEqual(imported["filename"], f"{index}-sahna.mp4")
             self.assertAlmostEqual(imported["sourceDuration"], 1, places=2)
+        subtitles = next(asset for asset in project["assets"] if asset["extension"] == ".srt")
+        track = await self.client.get(f"{self.base}/assets/{subtitles['id']}")
+        self.assertEqual(track.status_code, 200)
+        for scene in project["scenes"]:
+            self.assertIn(scene["narration"], track.content.decode("utf-8"))
         approved_id = project["finalAssetId"]
         approved = await self.client.post(self.base + "/actions", json={"action": "approve", "reviewedAssetId": approved_id})
         self.assertEqual(approved.status_code, 200)
