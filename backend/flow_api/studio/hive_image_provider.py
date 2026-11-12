@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import httpx
@@ -20,18 +22,36 @@ class HiveImageRejected(MediaError):
     """Hive definitively rejected the request before producing an image."""
 
 
-class RedactHiveURL(logging.Filter):
-    pattern = re.compile(r'(https://(?:cdn|hive-data-prod-cdn)\.thehive\.ai(?::443)?/[^?\s"<>]*)\?[^\s"<>]*', re.I)
+_hive_request: ContextVar[tuple[str, str] | None] = ContextVar("hive_request", default=None)
+
+
+class HiveTransportLogFilter(logging.Filter):
+    event = re.compile(
+        r"(?:connect_tcp|start_tls|send_request_headers|send_request_body|receive_response_headers|"
+        r"receive_response_body|response_closed|close)\.(?:started|complete|failed)"
+    )
 
     def filter(self, record):
-        message = record.getMessage()
-        redacted = self.pattern.sub(r"\1?[redacted]", message)
-        if redacted != message:
-            record.msg, record.args = redacted, ()
+        scope = _hive_request.get()
+        if scope is None:
+            return True
+        method, host = scope
+        summary = f"Hive {method} {host}"
+        if record.name == "httpx":
+            args = record.args
+            if isinstance(args, tuple) and len(args) == 5 and type(args[3]) is int:
+                summary += f" HTTP {args[3]}"
+        else:
+            # Transport traces can contain raw headers and exception details. Keep the event only.
+            event = str(record.msg).partition(" ")[0]
+            if self.event.fullmatch(event):
+                summary += f" {event}"
+        record.msg, record.args = summary, ()
+        record.exc_info = record.exc_text = record.stack_info = None
         return True
 
 
-redact_hive_url = RedactHiveURL()
+hive_log_filter = HiveTransportLogFilter()
 
 
 class RetryDownload(Exception):
@@ -40,11 +60,22 @@ class RetryDownload(Exception):
 
 class HiveImageProvider:
     def __init__(self, client: httpx.AsyncClient, key: str, *, generation_timeout=45, download_timeout=15):
-        logging.getLogger("httpx").addFilter(redact_hive_url)
+        for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+                     "httpcore.proxy", "httpcore.socks"):
+            logging.getLogger(name).addFilter(hive_log_filter)
         self.client = client
         self.key = key
         self.generation_timeout = generation_timeout
         self.download_timeout = download_timeout
+
+    @asynccontextmanager
+    async def request(self, method: str, url: httpx.URL, **kwargs):
+        token = _hive_request.set((method, url.host))
+        try:
+            async with self.client.stream(method, url, follow_redirects=False, **kwargs) as response:
+                yield response
+        finally:
+            _hive_request.reset(token)
 
     async def generate(self, request: ImageRequest, destination: Path) -> ImageResult:
         payload = {"input": {
@@ -53,9 +84,9 @@ class HiveImageProvider:
         }}
         try:
             async with asyncio.timeout(self.generation_timeout):
-                async with self.client.stream("POST", ENDPOINT, json=payload, headers={
+                async with self.request("POST", httpx.URL(ENDPOINT), json=payload, headers={
                     "Authorization": f"Bearer {self.key}", "Accept-Encoding": "identity",
-                }, follow_redirects=False) as response:
+                }) as response:
                     if response.status_code == 451:
                         raise HiveImageRejected("Hive blocked this image through moderation.")
                     if not response.is_success:
@@ -96,8 +127,7 @@ class HiveImageProvider:
 
     async def download(self, url: httpx.URL, destination: Path):
         async with asyncio.timeout(self.download_timeout):
-            async with self.client.stream("GET", url, headers={"Accept-Encoding": "identity"},
-                                          follow_redirects=False) as response:
+            async with self.request("GET", url, headers={"Accept-Encoding": "identity"}) as response:
                 if response.status_code in (408, 429, 500, 502, 503, 504):
                     raise RetryDownload
                 if (not response.is_success or response.headers.get("content-encoding", "identity").lower() != "identity"

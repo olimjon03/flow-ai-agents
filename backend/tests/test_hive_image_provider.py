@@ -1,11 +1,13 @@
 import asyncio
 import io
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpcore
 import httpx
 from PIL import Image
 
@@ -88,6 +90,33 @@ class HiveAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(MediaError, "downloadable PNG"):
             await (await self.provider(redirect)).generate(REQUEST, self.path)
         self.assertEqual(calls, ["POST", "GET"])
+
+    async def test_transport_debug_logs_hide_signed_redirect_and_sensitive_headers(self):
+        transport = httpx.AsyncHTTPTransport()
+        # Feed wire-format responses to the real HTTP/1.1 trace path without opening a socket.
+        transport._pool = httpcore.AsyncConnectionPool(network_backend=httpcore.AsyncMockBackend([
+            b"HTTP/1.1 302 redirect-reason-secret\r\n"
+            b"Location: https://untrusted.example/image?signature=redirect-secret\r\n"
+            b"Set-Cookie: session=cookie-secret\r\n"
+            b"Authorization: Bearer echoed-token-secret\r\nContent-Length: 0\r\n\r\n",
+        ]))
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = HiveImageProvider(client, "request-key-secret")
+            with self.assertLogs("httpx", level="INFO") as httpx_logs, \
+                 self.assertLogs("httpcore.http11", level="DEBUG") as transport_logs:
+                with self.assertRaisesRegex(MediaError, "downloadable PNG"):
+                    await provider.download(httpx.URL(DOWNLOAD), self.path)
+        logged = "\n".join(httpx_logs.output + transport_logs.output)
+        for secret in ("signature=private", "redirect-secret", "cookie-secret", "echoed-token-secret",
+                       "request-key-secret", "redirect-reason-secret"):
+            self.assertNotIn(secret, logged)
+        self.assertIn("Hive GET cdn.thehive.ai HTTP 302", logged)
+        self.assertIn("Hive GET cdn.thehive.ai receive_response_headers.complete", logged)
+        self.assertFalse(self.path.exists())
+
+        with self.assertLogs("httpcore.http11", level="DEBUG") as outside:
+            logging.getLogger("httpcore.http11").debug("Unrelated transport diagnostic")
+        self.assertIn("Unrelated transport diagnostic", outside.output[0])
 
     async def test_rejects_oversized_stream_and_invalid_response_shape(self):
         def oversized(request):
