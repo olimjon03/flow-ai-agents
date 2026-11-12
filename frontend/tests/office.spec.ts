@@ -64,18 +64,19 @@ test("desktop WebGL overview shows twelve readable stations and can pan, zoom an
   const labels = workstations.getByRole("button", { name: /workstation$/ });
   await expect(labels).toHaveCount(12, { timeout: 15_000 });
   const canvas = workstations.locator("canvas");
+  // Canvas and projected labels can resize between separate browser calls.
+  await expect.poll(() => labels.evaluateAll((buttons) => {
+    const surface = buttons[0]?.closest(".office-scene")?.querySelector("canvas");
+    if (!surface || buttons.length !== 12) return false;
+    const bounds = surface.getBoundingClientRect();
+    return buttons.every((button) => {
+      const box = button.getBoundingClientRect();
+      return box.left > bounds.left && box.top > bounds.top
+        && box.right < bounds.right && box.bottom < bounds.bottom && box.bottom < 900;
+    });
+  })).toBe(true);
   const bounds = await canvas.boundingBox();
   expect(bounds).not.toBeNull();
-
-  for (const label of await labels.all()) {
-    const box = await label.boundingBox();
-    expect(box).not.toBeNull();
-    expect(box!.x).toBeGreaterThan(bounds!.x);
-    expect(box!.y).toBeGreaterThan(bounds!.y);
-    expect(box!.x + box!.width).toBeLessThan(bounds!.x + bounds!.width);
-    expect(box!.y + box!.height).toBeLessThan(bounds!.y + bounds!.height);
-    expect(box!.y + box!.height).toBeLessThan(900);
-  }
 
   const scout = workstations.getByRole("button", { name: "Scout workstation", exact: true });
   await expect(scout).toHaveAccessibleDescription("Status: working");
